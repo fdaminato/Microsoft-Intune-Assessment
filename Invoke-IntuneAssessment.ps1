@@ -456,11 +456,12 @@ function ConvertTo-HtmlTable {
     $rows = @($Data)
     $safeId = ($Id -replace '[^a-zA-Z0-9_-]','_')
     $html = [System.Text.StringBuilder]::new()
-    [void]$html.AppendLine("<section class='section'>")
-    [void]$html.AppendLine("<div class='section-head'><h2>$(Encode-Html $Title)</h2><span class='pill'>$($rows.Count)</span></div>")
+
+    [void]$html.AppendLine("<section class='section' id='section-$safeId'>")
+    [void]$html.AppendLine("<h2>$(Encode-Html $Title) <span class='pill neutral'>$($rows.Count)</span></h2>")
 
     if ($rows.Count -eq 0) {
-        [void]$html.AppendLine("<p class='muted'>$(Encode-Html $EmptyMessage)</p></section>")
+        [void]$html.AppendLine("<div class='empty-card'>$(Encode-Html $EmptyMessage)</div></section>")
         return $html.ToString()
     }
 
@@ -473,26 +474,53 @@ function ConvertTo-HtmlTable {
         [void]$html.AppendLine("<p class='note'>Affichage limité à $shown ligne(s) dans le HTML. L'export CSV contient les données complètes.</p>")
     }
 
-    [void]$html.AppendLine("<div class='table-tools'><input type='search' placeholder='Filtrer...' onkeyup=`"filterTable('$safeId', this.value)`"></div>")
+    [void]$html.AppendLine("<div class='toolbar'>")
+    [void]$html.AppendLine("<input type='search' placeholder='Rechercher dans cette section...' onkeyup=`"filterTable('$safeId', this.value)`">")
+    [void]$html.AppendLine("<div class='result-count' id='count-$safeId'>$shown résultat(s) affiché(s)</div>")
+    [void]$html.AppendLine("</div>")
+
     [void]$html.AppendLine("<div class='table-wrap'><table id='$safeId'><thead><tr>")
-    foreach ($p in $Properties) {
-        [void]$html.Append("<th>$(Encode-Html $p)</th>")
+    for ($colIndex = 0; $colIndex -lt $Properties.Count; $colIndex++) {
+        $p = $Properties[$colIndex]
+        [void]$html.Append("<th data-sort onclick=`"sortTable('$safeId',$colIndex)`">$(Encode-Html $p)</th>")
     }
     [void]$html.AppendLine("</tr></thead><tbody>")
 
     for ($i = 0; $i -lt $shown; $i++) {
         $row = $rows[$i]
-        [void]$html.AppendLine("<tr>")
+        [void]$html.AppendLine("<tr class='data-row'>")
         foreach ($p in $Properties) {
             $prop = $row.PSObject.Properties[$p]
             $value = if ($null -ne $prop) { $prop.Value } else { "" }
+
             if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
                 $value = (@($value) -join ", ")
             }
-            [void]$html.Append("<td>$(Encode-Html $value)</td>")
+
+            $display = Encode-Html $value
+            $state = "$value".Trim()
+
+            if ($state -match '^(?i)(compliant|passed|success|successful|enabled|on|healthy|true)$') {
+                $display = "<span class='pill good'>$display</span>"
+            }
+            elseif ($state -match '^(?i)(noncompliant|non-compliant|failed|failure|error|disabled|off|false|critical)$') {
+                $display = "<span class='pill bad'>$display</span>"
+            }
+            elseif ($state -match '^(?i)(warning|warn|skipped|pending|inGracePeriod|graceperiod)$') {
+                $display = "<span class='pill warn'>$display</span>"
+            }
+            elseif ($state -match '^(?i)(conflict|investigate|unknown)$') {
+                $display = "<span class='pill investigate'>$display</span>"
+            }
+            elseif ($state -match '^(?i)(notApplicable|not applicable|notrun|not run|n/a|na)$') {
+                $display = "<span class='pill neutral'>$display</span>"
+            }
+
+            [void]$html.Append("<td>$display</td>")
         }
         [void]$html.AppendLine("</tr>")
     }
+
     [void]$html.AppendLine("</tbody></table></div></section>")
     return $html.ToString()
 }
@@ -503,7 +531,7 @@ function ConvertTo-HtmlTable {
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " Microsoft Intune - Complete Environment Assessment (macOS)" -ForegroundColor Cyan
+Write-Host " Microsoft Intune - Complete Environment Assessment (macOS) - Light HTML v1.2" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -1258,101 +1286,690 @@ $lowCount = @($findings | Where-Object Severity -eq "Low").Count
 
 $css = @'
 :root {
-  --bg: #0b1020;
-  --panel: #11182b;
-  --panel2: #151f35;
-  --text: #e8edf7;
-  --muted: #9aa8c2;
-  --line: #26334d;
-  --accent: #7db4ff;
-  --ok: #52d273;
-  --warn: #ffbd5b;
-  --bad: #ff6b6b;
-  --critical: #ff3b7a;
+  --bg:#f4f7fb;
+  --surface:#ffffff;
+  --surface2:#eef3f9;
+  --surface3:#dde7f2;
+  --border:#e2eaf3;
+  --text:#0f1e33;
+  --muted:#5e7292;
+  --accent:#2563eb;
+  --navy:#1e3a8a;
+  --green:#059669;
+  --green-soft:#d1fae5;
+  --red:#dc2626;
+  --red-soft:#fde2e2;
+  --amber:#d97706;
+  --amber-soft:#fef3c7;
+  --purple:#9333ea;
+  --purple-soft:#f3e8ff;
+  --gray:#64748b;
+  --gray-soft:#e8edf4;
+  --radius:12px;
+  --radius-sm:8px;
+  --shadow:0 2px 6px rgb(30 60 120 / .06), 0 1px 2px rgb(30 60 120 / .04);
+  --shadow-hover:0 8px 22px rgb(30 60 120 / .13);
+  --font:Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
 }
-* { box-sizing: border-box; }
+
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+
 body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Arial, sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  margin:0;
+  min-height:100vh;
+  background:var(--bg);
+  color:var(--text);
+  font:14px/1.45 var(--font);
 }
+
+button, input { font:inherit; }
+
 header {
-  padding: 32px 36px 24px;
-  background: linear-gradient(145deg, #10172a, #182746);
-  border-bottom: 1px solid var(--line);
+  position:sticky;
+  top:0;
+  z-index:100;
 }
-h1 { margin: 0 0 8px; font-size: 30px; }
-h2 { margin: 0; font-size: 19px; }
-.meta { color: var(--muted); font-size: 13px; }
-main { padding: 24px 30px 60px; max-width: 1800px; margin: auto; }
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit,minmax(170px,1fr));
-  gap: 14px;
-  margin-bottom: 22px;
+
+.topbar {
+  min-height:68px;
+  display:flex;
+  align-items:center;
+  gap:18px;
+  padding:12px 28px;
+  background:var(--surface);
+  border-top:3px solid var(--accent);
+  border-bottom:1px solid var(--border);
+  box-shadow:var(--shadow);
 }
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
+
+.brand-left {
+  min-width:0;
+  display:flex;
+  align-items:center;
+  gap:12px;
 }
-.card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
-.card .value { font-size: 28px; font-weight: 700; margin-top: 5px; }
-.section {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  margin: 0 0 20px;
-  padding: 16px;
+
+.logo-fallback {
+  width:42px;
+  height:42px;
+  min-width:42px;
+  overflow:hidden;
+  padding:0 7px;
+  border-radius:10px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:linear-gradient(135deg,var(--accent),var(--navy));
+  color:#fff;
+  font-size:16px;
+  line-height:1.05;
+  text-align:center;
+  font-weight:800;
+  box-shadow:var(--shadow);
 }
-.section-head {
-  display: flex; gap: 10px; align-items: center; justify-content: space-between;
-  margin-bottom: 12px;
+
+h1 {
+  margin:0;
+  font-size:16px;
+  line-height:1.2;
+  letter-spacing:-.01em;
 }
-.pill {
-  display: inline-block; padding: 3px 9px; border-radius: 999px;
-  background: var(--panel2); color: var(--accent); font-size: 12px;
+
+.subtitle {
+  margin-top:3px;
+  color:var(--muted);
+  font-size:11.5px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  max-width:900px;
 }
-.table-tools { margin: 10px 0; }
-input[type=search] {
-  width: min(420px,100%); background: #0c1325; border: 1px solid var(--line);
-  color: var(--text); border-radius: 8px; padding: 9px 11px;
+
+.topbar-actions {
+  margin-left:auto;
+  display:flex;
+  align-items:center;
+  gap:10px;
 }
-.table-wrap { overflow: auto; max-height: 640px; border: 1px solid var(--line); border-radius: 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th {
-  position: sticky; top: 0; z-index: 1; background: #1a2640; color: #dce8ff;
-  text-align: left; padding: 9px; border-bottom: 1px solid var(--line);
+
+.btn {
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  padding:8px 12px;
+  background:var(--surface);
+  color:var(--text);
+  cursor:pointer;
+  font-size:12.5px;
+  font-weight:600;
+  white-space:nowrap;
+  transition:.15s ease;
+  text-decoration:none;
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
 }
-td { padding: 8px 9px; border-bottom: 1px solid #1d2940; vertical-align: top; }
-tr:hover td { background: #121d33; }
-.muted { color: var(--muted); }
-.note { color: var(--warn); font-size: 12px; }
+
+.btn:hover {
+  background:var(--surface2);
+  transform:translateY(-1px);
+}
+
+.btn-primary {
+  background:var(--accent);
+  color:#fff;
+  border-color:transparent;
+}
+
+.btn-primary:hover { background:var(--navy); }
+
+.generated {
+  min-width:164px;
+  padding-left:12px;
+  border-left:1px solid var(--border);
+  color:var(--muted);
+  font-size:11.5px;
+  line-height:1.35;
+  text-align:right;
+}
+
+.generated strong {
+  color:var(--text);
+  font-weight:700;
+}
+
+.layout {
+  max-width:1800px;
+  margin:0 auto;
+  padding:26px 32px 38px;
+}
+
+.grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:14px;
+  margin-bottom:26px;
+}
+
+.grid > .card {
+  position:relative;
+  min-height:132px;
+  padding:16px 17px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  overflow:hidden;
+  transition:.15s ease;
+}
+
+.grid > .card:hover {
+  box-shadow:var(--shadow-hover);
+  transform:translateY(-1px);
+}
+
+.grid > .card::before {
+  content:"";
+  position:absolute;
+  top:0;
+  left:0;
+  right:0;
+  height:3px;
+  background:var(--accent);
+  opacity:.8;
+}
+
+.grid > .card.card-good::before { background:var(--green); }
+.grid > .card.card-bad::before { background:var(--red); }
+.grid > .card.card-warn::before { background:var(--amber); }
+.grid > .card.card-investigate::before { background:var(--purple); }
+
+.card-title {
+  color:var(--muted);
+  font-size:10.5px;
+  font-weight:700;
+  line-height:1.35;
+  text-transform:uppercase;
+  letter-spacing:.055em;
+}
+
+.card-value {
+  margin-top:9px;
+  color:var(--text);
+  font-size:27px;
+  font-weight:800;
+  line-height:1;
+  letter-spacing:-.025em;
+}
+
+.card-note {
+  margin-top:7px;
+  color:var(--muted);
+  font-size:11.5px;
+  line-height:1.4;
+}
+
+.good { color:var(--green) !important; }
+.bad { color:var(--red) !important; }
+.warn { color:var(--amber) !important; }
+.info { color:var(--accent) !important; }
+.investigate { color:var(--purple) !important; }
+
+.section { margin-top:26px; }
+
+.section h2 {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin:0 0 13px;
+  color:var(--muted);
+  font-size:12.5px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:.065em;
+}
+
+.section h2::before {
+  content:"";
+  width:4px;
+  height:17px;
+  border-radius:999px;
+  background:var(--accent);
+}
+
+.mini-grid {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(260px,1fr));
+  gap:14px;
+}
+
+.section .card,
+.empty-card {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+
+.empty-card {
+  padding:24px;
+  color:var(--muted);
+}
+
+.chart-card {
+  min-height:220px;
+  display:grid;
+  grid-template-columns:138px minmax(0,1fr);
+  align-items:center;
+  gap:17px;
+  padding:16px;
+}
+
+.pie {
+  position:relative;
+  width:132px;
+  height:132px;
+  border-radius:50%;
+  box-shadow:inset 0 0 0 1px var(--border);
+}
+
+.pie::after {
+  content:"";
+  position:absolute;
+  inset:26px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:50%;
+}
+
+.pie-center {
+  position:absolute;
+  inset:0;
+  z-index:1;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  color:var(--text);
+  font-size:18px;
+  font-weight:800;
+}
+
+.pie-center small {
+  font-size:9px;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.06em;
+}
+
+.legend {
+  display:grid;
+  gap:8px;
+  color:var(--text);
+  font-size:12px;
+  min-width:0;
+}
+
+.legend-row {
+  display:grid;
+  grid-template-columns:11px minmax(0,1fr) auto;
+  gap:8px;
+  align-items:center;
+}
+
+.legend-row span:nth-child(2) {
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.legend-row strong {
+  color:var(--text);
+  font-size:11.5px;
+}
+
+.dot {
+  width:10px;
+  height:10px;
+  border-radius:999px;
+}
+
+.dot.green { background:var(--green); }
+.dot.red { background:var(--red); }
+.dot.blue { background:var(--accent); }
+.dot.orange { background:var(--amber); }
+.dot.purple { background:var(--purple); }
+.dot.gray { background:var(--gray); }
+
+.chart-list-card {
+  min-height:220px;
+  padding:16px;
+}
+
+.chart-list-title {
+  margin:0 0 14px;
+  color:var(--text);
+  font-size:13px;
+  font-weight:800;
+}
+
+.bar-list {
+  display:grid;
+  gap:10px;
+}
+
+.bar-row {
+  display:grid;
+  grid-template-columns:minmax(95px,130px) minmax(80px,1fr) 48px;
+  align-items:center;
+  gap:10px;
+  font-size:11.5px;
+}
+
+.bar-label {
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+}
+
+.bar-track {
+  height:8px;
+  border-radius:999px;
+  background:var(--surface3);
+  overflow:hidden;
+}
+
+.bar-fill {
+  height:100%;
+  min-width:2px;
+  border-radius:999px;
+  background:linear-gradient(90deg,var(--accent),var(--navy));
+}
+
+.bar-fill.green-fill { background:var(--green); }
+.bar-fill.red-fill { background:var(--red); }
+.bar-fill.amber-fill { background:var(--amber); }
+.bar-fill.purple-fill { background:var(--purple); }
+
+.bar-count {
+  text-align:right;
+  font-weight:800;
+}
+
+.findings-card {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  overflow:hidden;
+}
+
 .finding {
-  display: grid;
-  grid-template-columns: 90px 170px 1fr 1.2fr;
-  gap: 12px;
-  align-items: start;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
+  display:grid;
+  grid-template-columns:95px 220px minmax(260px,1fr) minmax(300px,1.2fr);
+  gap:14px;
+  align-items:start;
+  padding:15px 16px;
+  border-bottom:1px solid var(--border);
 }
-.finding:last-child { border-bottom: 0; }
-.sev {
-  font-weight: 700; border-radius: 999px; padding: 4px 9px; text-align: center;
-  font-size: 11px; display: inline-block;
+
+.finding:last-child { border-bottom:0; }
+
+.finding-title {
+  font-weight:800;
+  color:var(--text);
 }
-.sev-Critical { background: rgba(255,59,122,.18); color: #ff86aa; }
-.sev-High { background: rgba(255,107,107,.18); color: #ff9d9d; }
-.sev-Medium { background: rgba(255,189,91,.18); color: #ffd08a; }
-.sev-Low { background: rgba(125,180,255,.15); color: #a9ccff; }
-.sev-Info { background: rgba(154,168,194,.12); color: #c1cbdd; }
-.small { font-size: 12px; color: var(--muted); }
-@media (max-width: 900px) {
-  .finding { grid-template-columns: 1fr; }
-  main { padding: 14px; }
-  header { padding: 24px 18px; }
+
+.finding-category {
+  margin-bottom:3px;
+  color:var(--muted);
+  font-size:10px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:.055em;
+}
+
+.small {
+  color:var(--muted);
+  font-size:11px;
+}
+
+.note {
+  margin:0 0 10px;
+  color:var(--amber);
+  font-size:11.5px;
+}
+
+.toolbar {
+  display:flex;
+  gap:9px;
+  flex-wrap:wrap;
+  align-items:flex-start;
+  padding:14px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  margin-bottom:13px;
+}
+
+input[type="search"] {
+  min-height:38px;
+  min-width:340px;
+  flex:1 1 340px;
+  padding:8px 10px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text);
+  font-size:12.5px;
+}
+
+input[type="search"]::placeholder { color:var(--muted); }
+
+.result-count {
+  margin-left:auto;
+  min-height:38px;
+  display:flex;
+  align-items:center;
+  padding:0 6px;
+  color:var(--muted);
+  font-size:11.5px;
+}
+
+.table-wrap {
+  overflow:auto;
+  max-height:760px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+
+table {
+  width:100%;
+  border-collapse:collapse;
+  font-size:12.5px;
+  white-space:nowrap;
+}
+
+th {
+  position:sticky;
+  top:0;
+  z-index:2;
+  padding:11px 12px;
+  background:var(--surface2);
+  border-bottom:1px solid var(--border);
+  color:var(--muted);
+  text-align:left;
+  font-size:10px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:.045em;
+  cursor:pointer;
+  user-select:none;
+}
+
+th[data-sort]::after {
+  content:" ↕";
+  opacity:.45;
+}
+
+td {
+  padding:10px 12px;
+  border-bottom:1px solid var(--border);
+  vertical-align:top;
+  max-width:620px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+tbody tr.data-row:hover td { background:var(--surface2); }
+tbody tr:last-child td { border-bottom:0; }
+
+.pill {
+  display:inline-flex;
+  align-items:center;
+  padding:3px 8px;
+  border:1px solid var(--border);
+  border-radius:999px;
+  background:var(--surface3);
+  color:var(--muted);
+  font-size:10.5px;
+  font-weight:700;
+}
+
+.pill.good {
+  background:var(--green-soft);
+  border-color:transparent;
+  color:var(--green) !important;
+}
+
+.pill.bad {
+  background:var(--red-soft);
+  border-color:transparent;
+  color:var(--red) !important;
+}
+
+.pill.warn {
+  background:var(--amber-soft);
+  border-color:transparent;
+  color:var(--amber) !important;
+}
+
+.pill.investigate {
+  background:var(--purple-soft);
+  border-color:transparent;
+  color:var(--purple) !important;
+}
+
+.pill.neutral {
+  background:var(--gray-soft);
+  border-color:transparent;
+  color:var(--gray) !important;
+}
+
+.pill.critical {
+  background:var(--red-soft);
+  border-color:transparent;
+  color:var(--red) !important;
+}
+
+.pill.high {
+  background:var(--amber-soft);
+  border-color:transparent;
+  color:var(--amber) !important;
+}
+
+.pill.medium {
+  background:var(--purple-soft);
+  border-color:transparent;
+  color:var(--purple) !important;
+}
+
+.pill.low {
+  background:var(--green-soft);
+  border-color:transparent;
+  color:var(--green) !important;
+}
+
+.data-row td .pill {
+  min-height:24px;
+  justify-content:center;
+  gap:6px;
+  padding:5px 9px;
+  border:0;
+  border-radius:8px;
+  font-size:10.5px;
+  line-height:1;
+}
+
+.data-row td .pill::before,
+.finding .pill::before {
+  content:"";
+  display:block;
+  width:6px;
+  height:6px;
+  min-width:6px;
+  flex:0 0 6px;
+  border-radius:999px;
+  background:currentColor;
+  opacity:.78;
+}
+
+footer {
+  max-width:1800px;
+  margin:0 auto;
+  padding:0 32px 32px;
+  color:var(--muted);
+  font-size:11.5px;
+}
+
+@media (max-width:1180px) {
+  .mini-grid { grid-template-columns:1fr; }
+  .finding { grid-template-columns:95px 1fr; }
+  .finding-detail, .finding-action { grid-column:2; }
+}
+
+@media (max-width:820px) {
+  .topbar {
+    align-items:flex-start;
+    padding:12px 16px;
+    flex-wrap:wrap;
+  }
+
+  .topbar-actions {
+    width:100%;
+    margin-left:54px;
+    flex-wrap:wrap;
+  }
+
+  .generated { margin-left:auto; }
+  .layout { padding:20px 16px 30px; }
+  input[type="search"] { min-width:100%; }
+  .finding { grid-template-columns:1fr; }
+  .finding-detail, .finding-action { grid-column:auto; }
+}
+
+@media print {
+  header { position:static; }
+  .topbar-actions .btn,
+  .toolbar { display:none !important; }
+
+  .table-wrap {
+    max-height:none;
+    overflow:visible;
+  }
+
+  .table-wrap,
+  .grid > .card,
+  .section .card,
+  .findings-card {
+    box-shadow:none;
+  }
+
+  body { background:#fff; }
 }
 '@
 
@@ -1361,50 +1978,146 @@ function filterTable(id, query) {
   query = (query || "").toLowerCase();
   const table = document.getElementById(id);
   if (!table) return;
-  const rows = table.querySelectorAll("tbody tr");
+
+  const rows = table.querySelectorAll("tbody tr.data-row");
+  let visible = 0;
+
   rows.forEach(r => {
-    r.style.display = r.innerText.toLowerCase().includes(query) ? "" : "none";
+    const show = r.innerText.toLowerCase().includes(query);
+    r.style.display = show ? "" : "none";
+    if (show) visible++;
   });
+
+  const counter = document.getElementById("count-" + id);
+  if (counter) counter.textContent = visible + " résultat(s) affiché(s)";
+}
+
+const sortState = {};
+
+function sortTable(id, column) {
+  const table = document.getElementById(id);
+  if (!table) return;
+
+  const tbody = table.querySelector("tbody");
+  const rows = Array.from(tbody.querySelectorAll("tr.data-row"));
+  const key = id + ":" + column;
+  const ascending = sortState[key] !== true;
+  sortState[key] = ascending;
+
+  rows.sort((a, b) => {
+    const av = (a.children[column]?.innerText || "").trim();
+    const bv = (b.children[column]?.innerText || "").trim();
+
+    const an = Number(av.replace(/[% ,]/g, ""));
+    const bn = Number(bv.replace(/[% ,]/g, ""));
+    const numeric = av !== "" && bv !== "" && !Number.isNaN(an) && !Number.isNaN(bn);
+
+    if (numeric) return ascending ? an - bn : bn - an;
+    return ascending
+      ? av.localeCompare(bv, undefined, {numeric:true, sensitivity:"base"})
+      : bv.localeCompare(av, undefined, {numeric:true, sensitivity:"base"});
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
 }
 '@
 
+# Build chart values
+$compliantDeviceCount = @($deviceInventory | Where-Object { "$($_.ComplianceState)" -match '^(?i)compliant$' }).Count
+$otherComplianceCount = [math]::Max(0, $totalDevices - $compliantDeviceCount - $nonCompliantCount)
+$compliantSlice = if ($totalDevices -gt 0) { [math]::Round(($compliantDeviceCount / $totalDevices) * 100, 2) } else { 0 }
+$nonCompliantSliceEnd = if ($totalDevices -gt 0) { [math]::Round((($compliantDeviceCount + $nonCompliantCount) / $totalDevices) * 100, 2) } else { 0 }
+
+$maxPlatformCount = if ($platformSummary.Count -gt 0) { ($platformSummary | Measure-Object Count -Maximum).Maximum } else { 1 }
+$platformBars = [System.Text.StringBuilder]::new()
+foreach ($p in @($platformSummary | Select-Object -First 6)) {
+    $width = if ($maxPlatformCount -gt 0) { [math]::Round(($p.Count / $maxPlatformCount) * 100, 1) } else { 0 }
+    [void]$platformBars.AppendLine("<div class='bar-row'><div class='bar-label' title='$(Encode-Html $p.OperatingSystem)'>$(Encode-Html $p.OperatingSystem)</div><div class='bar-track'><div class='bar-fill' style='width:$width%'></div></div><div class='bar-count'>$($p.Count)</div></div>")
+}
+
+$securityBarsData = @(
+    [pscustomobject]@{ Name="Secure Boot Off"; Count=$secureBootOff.Count; Class="red-fill" },
+    [pscustomobject]@{ Name="BitLocker Off"; Count=$bitLockerOff.Count; Class="red-fill" },
+    [pscustomobject]@{ Name="TPM Issues"; Count=$tpmProblem.Count; Class="amber-fill" },
+    [pscustomobject]@{ Name="Attestation"; Count=$attestationErrors.Count; Class="purple-fill" },
+    [pscustomobject]@{ Name="VSM Off"; Count=$vsmOff.Count; Class="amber-fill" }
+)
+$maxSecurityCount = [math]::Max(1, (($securityBarsData | Measure-Object Count -Maximum).Maximum))
+$securityBars = [System.Text.StringBuilder]::new()
+foreach ($s in $securityBarsData) {
+    $width = [math]::Round(($s.Count / $maxSecurityCount) * 100, 1)
+    [void]$securityBars.AppendLine("<div class='bar-row'><div class='bar-label'>$(Encode-Html $s.Name)</div><div class='bar-track'><div class='bar-fill $($s.Class)' style='width:$width%'></div></div><div class='bar-count'>$($s.Count)</div></div>")
+}
+
 $html = [System.Text.StringBuilder]::new()
 [void]$html.AppendLine("<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>")
-[void]$html.AppendLine("<title>Intune Environment Assessment</title><style>$css</style></head><body>")
-[void]$html.AppendLine("<header><h1>Microsoft Intune — Environment Assessment</h1>")
-[void]$html.AppendLine("<div class='meta'>Tenant: $(Encode-Html $tenantId) &nbsp;|&nbsp; Compte: $(Encode-Html $account) &nbsp;|&nbsp; Généré: $(Encode-Html ($runEnd.ToString('yyyy-MM-dd HH:mm:ss zzz'))) &nbsp;|&nbsp; Durée: $([math]::Round($duration.TotalMinutes,1)) min</div></header>")
-[void]$html.AppendLine("<main>")
+[void]$html.AppendLine("<title>Microsoft Intune - Environment Assessment</title><style>$css</style></head><body>")
 
-[void]$html.AppendLine("<div class='cards'>")
+[void]$html.AppendLine("<header><div class='topbar'>")
+[void]$html.AppendLine("<div class='brand-left'><div class='logo-fallback'>IN</div><div>")
+[void]$html.AppendLine("<h1>Microsoft Intune — Environment Assessment</h1>")
+[void]$html.AppendLine("<div class='subtitle'>Tenant $(Encode-Html $tenantId) · $(Encode-Html $account) · Audit complet des appareils, conformité, sécurité, profils, applications et enrôlement</div>")
+[void]$html.AppendLine("</div></div>")
+[void]$html.AppendLine("<div class='topbar-actions'><button class='btn' onclick='window.print()'>Imprimer</button><a class='btn btn-primary' href='#findings'>Constats prioritaires</a></div>")
+[void]$html.AppendLine("<div class='generated'>Généré le<br><strong>$(Encode-Html ($runEnd.ToString('yyyy-MM-dd HH:mm:ss zzz')))</strong><br>$([math]::Round($duration.TotalMinutes,1)) min</div>")
+[void]$html.AppendLine("</div></header>")
+
+[void]$html.AppendLine("<main class='layout'>")
+
+[void]$html.AppendLine("<div class='grid'>")
 $cards = @(
-    @("Devices",$totalDevices),
-    @("Compliance %","$compliancePct %"),
-    @("Non compliant",$nonCompliantCount),
-    @("Stale ≥ $StaleDays j",$staleCount),
-    @("Very stale ≥ $VeryStaleDays j",$veryStaleCount),
-    @("Secure Boot Off",$secureBootOff.Count),
-    @("BitLocker Off",$bitLockerOff.Count),
-    @("Profile failures",$profileFailures.Count),
-    @("App failures",$appFailures.Count),
-    @("High findings",$highCount)
+    [pscustomobject]@{Title="Appareils gérés"; Value=$totalDevices; Note="Inventaire Intune"; Class=""; ValueClass="" },
+    [pscustomobject]@{Title="Conformité"; Value="$compliancePct %"; Note="$compliantDeviceCount appareil(s) compliant"; Class="card-good"; ValueClass="good" },
+    [pscustomobject]@{Title="Non compliant"; Value=$nonCompliantCount; Note="$($nonComplianceReasons.Count) paramètre(s)/résultat(s) détecté(s)"; Class="card-bad"; ValueClass="bad" },
+    [pscustomobject]@{Title="Stale ≥ $StaleDays jours"; Value=$staleCount; Note="$veryStaleCount très stale (≥ $VeryStaleDays j)"; Class="card-warn"; ValueClass="warn" },
+    [pscustomobject]@{Title="Secure Boot Off"; Value=$secureBootOff.Count; Note="$($secureBootUnknown.Count) état(s) inconnu(s)/N/A"; Class="card-bad"; ValueClass="bad" },
+    [pscustomobject]@{Title="BitLocker Off"; Value=$bitLockerOff.Count; Note="$($bitLockerUnknown.Count) état(s) inconnu(s)/N/A"; Class="card-bad"; ValueClass="bad" },
+    [pscustomobject]@{Title="Profils en échec"; Value=$profileFailures.Count; Note="$($profileFailureSummary.Count) profil(s) concerné(s)"; Class="card-investigate"; ValueClass="investigate" },
+    [pscustomobject]@{Title="Apps en échec"; Value=$appFailures.Count; Note="Applications avec au moins un échec"; Class="card-warn"; ValueClass="warn" },
+    [pscustomobject]@{Title="Constats High"; Value=$highCount; Note="$criticalCount Critical · $mediumCount Medium · $lowCount Low"; Class="card-bad"; ValueClass="bad" }
 )
+
 foreach ($c in $cards) {
-    [void]$html.AppendLine("<div class='card'><div class='label'>$(Encode-Html $c[0])</div><div class='value'>$(Encode-Html $c[1])</div></div>")
+    [void]$html.AppendLine("<div class='card $($c.Class)'><div class='card-title'>$(Encode-Html $c.Title)</div><div class='card-value $($c.ValueClass)'>$(Encode-Html $c.Value)</div><div class='card-note'>$(Encode-Html $c.Note)</div></div>")
 }
 [void]$html.AppendLine("</div>")
 
+# Visual summary
+[void]$html.AppendLine("<section class='section'><h2>Vue d'ensemble</h2><div class='mini-grid'>")
+
+[void]$html.AppendLine("<div class='card chart-card'>")
+[void]$html.AppendLine("<div class='pie' style='background:conic-gradient(var(--green) 0 $compliantSlice%, var(--red) $compliantSlice% $nonCompliantSliceEnd%, var(--gray) $nonCompliantSliceEnd% 100%)'><div class='pie-center'>$compliancePct%<small>Compliance</small></div></div>")
+[void]$html.AppendLine("<div class='legend'>")
+[void]$html.AppendLine("<div class='legend-row'><span class='dot green'></span><span>Compliant</span><strong>$compliantDeviceCount</strong></div>")
+[void]$html.AppendLine("<div class='legend-row'><span class='dot red'></span><span>Non compliant</span><strong>$nonCompliantCount</strong></div>")
+[void]$html.AppendLine("<div class='legend-row'><span class='dot gray'></span><span>Autre / inconnu</span><strong>$otherComplianceCount</strong></div>")
+[void]$html.AppendLine("</div></div>")
+
+[void]$html.AppendLine("<div class='card chart-list-card'><div class='chart-list-title'>Plateformes</div><div class='bar-list'>$($platformBars.ToString())</div></div>")
+[void]$html.AppendLine("<div class='card chart-list-card'><div class='chart-list-title'>Sécurité Windows — écarts</div><div class='bar-list'>$($securityBars.ToString())</div></div>")
+
+[void]$html.AppendLine("</div></section>")
+
 # Findings
-[void]$html.AppendLine("<section class='section'><div class='section-head'><h2>Constats prioritaires</h2><span class='pill'>$($findings.Count)</span></div>")
-[void]$html.AppendLine("<p class='small'>Critical: $criticalCount &nbsp; High: $highCount &nbsp; Medium: $mediumCount &nbsp; Low: $lowCount</p>")
+[void]$html.AppendLine("<section class='section' id='findings'><h2>Constats prioritaires <span class='pill neutral'>$($findings.Count)</span></h2>")
+[void]$html.AppendLine("<div class='findings-card'>")
 foreach ($f in $findings) {
+    $sevClass = switch ($f.Severity) {
+        "Critical" { "critical" }
+        "High"     { "high" }
+        "Medium"   { "medium" }
+        "Low"      { "low" }
+        default    { "neutral" }
+    }
+
     [void]$html.AppendLine("<div class='finding'>")
-    [void]$html.AppendLine("<div><span class='sev sev-$(Encode-Html $f.Severity)'>$(Encode-Html $f.Severity)</span><div class='small'>Count: $($f.Count)</div></div>")
-    [void]$html.AppendLine("<div><strong>$(Encode-Html $f.Category)</strong><br>$(Encode-Html $f.Title)</div>")
-    [void]$html.AppendLine("<div>$(Encode-Html $f.Detail)</div>")
-    [void]$html.AppendLine("<div><strong>Action:</strong> $(Encode-Html $f.Recommendation)</div>")
+    [void]$html.AppendLine("<div><span class='pill $sevClass'>$(Encode-Html $f.Severity)</span><div class='small'>Count: $($f.Count)</div></div>")
+    [void]$html.AppendLine("<div><div class='finding-category'>$(Encode-Html $f.Category)</div><div class='finding-title'>$(Encode-Html $f.Title)</div></div>")
+    [void]$html.AppendLine("<div class='finding-detail'>$(Encode-Html $f.Detail)</div>")
+    [void]$html.AppendLine("<div class='finding-action'><strong>Action :</strong> $(Encode-Html $f.Recommendation)</div>")
     [void]$html.AppendLine("</div>")
 }
-[void]$html.AppendLine("</section>")
+[void]$html.AppendLine("</div></section>")
 
 [void]$html.AppendLine((ConvertTo-HtmlTable -Id "platformSummary" -Title "Répartition par plateforme" -Data $platformSummary -Properties @("OperatingSystem","Count","Percentage")))
 [void]$html.AppendLine((ConvertTo-HtmlTable -Id "complianceSummary" -Title "Résumé conformité" -Data $complianceSummary -Properties @("State","Count","Percentage")))
@@ -1421,9 +2134,12 @@ foreach ($f in $findings) {
 [void]$html.AppendLine((ConvertTo-HtmlTable -Id "profileInventory" -Title "Inventaire des profils et politiques" -Data @($profileInventory) -Properties @("Type","Name","Platform","Technology","SettingsCount","Created","LastModified")))
 [void]$html.AppendLine((ConvertTo-HtmlTable -Id "devices" -Title "Inventaire complet des appareils" -Data $deviceInventory -Properties @("DeviceName","UserPrincipalName","OS","OSVersion","Manufacturer","Model","ComplianceState","LastSync","DaysSinceLastSync","Encrypted","SecureBoot","BitLockerDHA","TPMVersion","ManagementAgent","OwnerType","EnrollmentType","SerialNumber")))
 
-[void]$html.AppendLine("<section class='section'><h2>Exports</h2><p class='muted'>Les dossiers CSV, JSON et RawReports situés à côté de ce rapport contiennent les données complètes utilisées pour l'analyse. Le HTML peut limiter certaines grandes tables à 5000 lignes pour préserver les performances du navigateur.</p></section>")
+[void]$html.AppendLine("<section class='section'><h2>Exports</h2><div class='empty-card'>Les dossiers <strong>CSV</strong>, <strong>JSON</strong> et <strong>RawReports</strong> situés à côté de ce rapport contiennent les données complètes utilisées pour l'analyse. Les très grandes tables HTML sont limitées à 5000 lignes afin de conserver de bonnes performances dans le navigateur.</div></section>")
 
-[void]$html.AppendLine("</main><script>$js</script></body></html>")
+[void]$html.AppendLine("</main>")
+[void]$html.AppendLine("<footer>Microsoft Intune Environment Assessment · Rapport généré localement par PowerShell · Lecture seule Microsoft Graph</footer>")
+[void]$html.AppendLine("<script>$js</script></body></html>")
+
 $html.ToString() | Set-Content -LiteralPath $reportFile -Encoding UTF8
 
 # Machine-readable executive summary
