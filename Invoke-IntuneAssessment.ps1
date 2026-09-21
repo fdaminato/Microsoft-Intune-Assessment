@@ -45,6 +45,7 @@
       DeviceManagementServiceConfig.Read.All
 
     Aucune modification n'est effectuée dans Intune.
+    Authentification : connexion interactive via le navigateur (pas de Device Code).
 
     Version 1.1:
       - Corrige les erreurs StrictMode sur les propriétés Graph facultatives (@odata.type, etc.)
@@ -78,9 +79,6 @@ param(
 
     [Parameter()]
     [switch]$SkipOptionalReports,
-
-    [Parameter()]
-    [switch]$InteractiveBrowser,
 
     [Parameter()]
     [switch]$NoOpenReport
@@ -531,7 +529,7 @@ function ConvertTo-HtmlTable {
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " Microsoft Intune - Complete Environment Assessment (macOS) - Light HTML v1.2" -ForegroundColor Cyan
+Write-Host " Microsoft Intune - Complete Environment Assessment (macOS) - Light HTML v1.3 / Browser Login" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -575,12 +573,8 @@ $scopes = @(
     "DeviceManagementServiceConfig.Read.All"
 )
 
-Write-Step "Connexion à Microsoft Graph (lecture seule)"
-if ($InteractiveBrowser) {
-    Connect-MgGraph -Scopes $scopes -NoWelcome
-} else {
-    Connect-MgGraph -Scopes $scopes -UseDeviceCode -NoWelcome
-}
+Write-Step "Connexion à Microsoft Graph via le navigateur (lecture seule)"
+Connect-MgGraph -Scopes $scopes -NoWelcome
 
 $ctx = Get-MgContext
 if (-not $ctx) { throw "Connexion Microsoft Graph non établie." }
