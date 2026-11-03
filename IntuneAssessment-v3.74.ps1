@@ -92,11 +92,12 @@
 .EXAMPLE
  .\Invoke-IntuneAssessmentDashboard.ps1 -InactiveDays 45 -SkipAppStatuses -SkipDirectoryUsers -OpenReport
 .NOTES
- Version 3.73 (consolidated build: no separate patch files required).
+ Version 3.74 (consolidated build: no separate patch files required).
  Requires PowerShell 7.2+ (ForEach-Object -Parallel, ConvertFrom-Json -AsHashtable, .NET 6 SHA256.HashData).
  Layout: 1 Parameters / 2 Console UI / 3 Helpers (Graph, CSV, report exports) / 4 Connection /
  5 Collections / 6 Analysis & findings / 7 Scoring & action plan / 8 HTML report / 9 Executive documents.
  Changelog (summary):
+  3.74 Baseline choice: OpenIntuneBaseline (latest) or Windows Baseline 24H2 / 25H2 / 26H2 (fdaminato).
   3.73 Zero Trust view: Microsoft Zero Trust Assessment device tests (Windows, macOS, iOS, Android, tenant);
        Intune apps read from Graph beta (Store apps (new) / winGetApp now listed); -SkipZeroTrust.
   3.72 Start-up prompt to choose FlorianBaseline (default) or OpenIntuneBaseline; new -Baseline parameter.
@@ -155,7 +156,7 @@ param(
  [switch]$SkipOpenIntuneBaseline,
  [string]$OpenIntuneBaselineRef = "main",
  [string]$OpenIntuneBaselineMacRef = "main",
- [ValidateSet('Prompt','FlorianBaseline','OpenIntuneBaseline')][string]$Baseline = 'Prompt',
+ [ValidateSet('Prompt','OpenIntuneBaseline','Windows24H2','Windows25H2','Windows26H2')][string]$Baseline = 'Prompt',
  [string]$BaselineRepo = '',
  [string]$BaselineName = '',
  [string]$BaselineRef = '',
@@ -186,29 +187,39 @@ param(
 # =====================================================================================
 $ErrorActionPreference = 'Stop'
 $EnableCache = -not $DisableCache
-# Baseline selection (v3.72): asked once at start-up unless -Baseline, -BaselineRepo or -BaselinePath is given.
+# Baseline selection (v3.74): asked once at start-up unless -Baseline, -BaselineRepo or -BaselinePath is given.
+# OpenIntuneBaseline always uses the latest commit of its default branch (main).
 $baselineExplicit=$PSBoundParameters.ContainsKey('BaselineRepo') -or $PSBoundParameters.ContainsKey('BaselinePath')
+$BaselinePathFilter=''
+$baselinePlatforms=@('Windows','macOS')
 if(-not $baselineExplicit -and -not $SkipOpenIntuneBaseline){
  if($Baseline -eq 'Prompt'){
   $nonInteractiveArg=@([Environment]::GetCommandLineArgs() | Where-Object {$_ -match '(?i)^-noni'}).Count -gt 0
   if([Environment]::UserInteractive -and -not $nonInteractiveArg -and -not [Console]::IsInputRedirected){
    Write-Host ''
    Write-Host 'Choose the configuration baseline to compare with:' -ForegroundColor Cyan
-   Write-Host '  [1] FlorianBaseline     (github.com/fdaminato/IntuneBaseline)  - default'
-   Write-Host '  [2] OpenIntuneBaseline  (github.com/SkipToTheEndpoint/OpenIntuneBaseline)'
-   do{$baselineAnswer=([string](Read-Host 'Baseline [1/2] (Enter = 1)')).Trim()}while($baselineAnswer -notin @('','1','2'))
-   $Baseline=if($baselineAnswer -eq '2'){'OpenIntuneBaseline'}else{'FlorianBaseline'}
-  }else{$Baseline='FlorianBaseline'}
+   Write-Host '  [1] OpenIntuneBaseline       (SkipToTheEndpoint, latest version, Windows + macOS) - default'
+   Write-Host '  [2] Windows Baseline 24H2    (fdaminato/Microsoft-Intune-Assessment, Windows only)'
+   Write-Host '  [3] Windows Baseline 25H2    (fdaminato/Microsoft-Intune-Assessment, Windows only)'
+   Write-Host '  [4] Windows Baseline 26H2    (fdaminato/Microsoft-Intune-Assessment, Windows only)'
+   do{$baselineAnswer=([string](Read-Host 'Baseline [1-4] (Enter = 1)')).Trim()}while($baselineAnswer -notin @('','1','2','3','4'))
+   $Baseline=switch($baselineAnswer){'2'{'Windows24H2'};'3'{'Windows25H2'};'4'{'Windows26H2'};default{'OpenIntuneBaseline'}}
+  }else{$Baseline='OpenIntuneBaseline'}
  }
  if($Baseline -eq 'OpenIntuneBaseline'){
   $BaselineRepo='SkipToTheEndpoint/OpenIntuneBaseline'
+  if(-not $PSBoundParameters.ContainsKey('OpenIntuneBaselineRef')){$OpenIntuneBaselineRef='main'}
+  if(-not $PSBoundParameters.ContainsKey('OpenIntuneBaselineMacRef')){$OpenIntuneBaselineMacRef='main'}
   if(-not $BaselineName){$BaselineName='OpenIntuneBaseline'}
  }else{
-  $BaselineRepo='fdaminato/IntuneBaseline'
-  if(-not $BaselineName){$BaselineName='FlorianBaseline'}
+  $winRelease=$Baseline.Substring(7)
+  $BaselineRepo='fdaminato/Microsoft-Intune-Assessment'
+  $BaselinePathFilter='(?i)^Windows Baseline/.*'+$winRelease+'.*\.json$'
+  $baselinePlatforms=@('Windows')
+  if(-not $BaselineName){$BaselineName="Windows Baseline $winRelease"}
  }
  Write-Host "Baseline selected: $BaselineName" -ForegroundColor Green
-}elseif(-not $BaselineRepo){$BaselineRepo='fdaminato/IntuneBaseline'}
+}elseif(-not $BaselineRepo){$BaselineRepo='SkipToTheEndpoint/OpenIntuneBaseline'}
 $ProgressPreference = 'SilentlyContinue'
 $base = 'https://graph.microsoft.com/v1.0'
 $warnings = [System.Collections.Generic.List[string]]::new()
@@ -1572,9 +1583,9 @@ if($SkipOpenIntuneBaseline){$collection['OpenIntuneBaseline']='Skipped';$oibSumm
 elseif($collection['Settings catalog policies'] -ne 'Complete'){
  $collection['OpenIntuneBaseline']='Unavailable';$oibSummary.Status='Not assessed: Settings Catalog enumeration unavailable'
 }else{
- foreach($oibPlatform in @('Windows','macOS')) {
+ foreach($oibPlatform in @($baselinePlatforms)) {
  $platformRef=if($BaselineRef){$BaselineRef}elseif($isOibRepo -and $oibPlatform -eq 'Windows'){$OpenIntuneBaselineRef}elseif($isOibRepo){$OpenIntuneBaselineMacRef}else{'HEAD'}
- $platformPattern=if(-not $isOibRepo){'(?i)\.json$'}elseif($oibPlatform -eq 'Windows'){'^WINDOWS/IntuneManagement/SettingsCatalog/.+\.json$'}else{'(?i)^MACOS/(?:IntuneManagement/)?(?:SettingsCatalog/|.*?/SettingsCatalog/).+\.json$'}
+ $platformPattern=if(-not $isOibRepo){if($BaselinePathFilter){$BaselinePathFilter}else{'(?i)\.json$'}}elseif($oibPlatform -eq 'Windows'){'^WINDOWS/IntuneManagement/SettingsCatalog/.+\.json$'}else{'(?i)^MACOS/(?:IntuneManagement/)?(?:SettingsCatalog/|.*?/SettingsCatalog/).+\.json$'}
  $platformRows=[System.Collections.Generic.List[object]]::new()
  $oibSummary=[ordered]@{Reference=$platformRef;Commit='';Platform=$oibPlatform;Source=$baselineSourceLabel;Name=$BaselineName;Status='Not assessed';BaselinePolicies=0;BaselineSettings=0;TenantPolicies=0;Matched=0;Different=0;Missing=0;Conflicting=0;Unassessed=0}
  Say ("Collecting $BaselineName $oibPlatform Settings Catalog reference...")
@@ -4949,7 +4960,7 @@ if($script:Anon.Enabled){
  # Raw Intune export CSV files contain real names: removed from anonymized runs.
  Get-ChildItem -LiteralPath $runPath -Directory -Filter 'GraphExport-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
-$meta=[ordered]@{ScriptVersion='3.73';BaselineName=$BaselineName;BaselineSource=$baselineSourceLabel;OverallScore=$overallScore;DomainScores=@($domainScores|Select-Object Domain,Score,Rating,High,Medium,Low);Findings=@($findings|Select-Object Severity,Area,Finding,Affected);TenantId=$ctx.TenantId;Generated=$now.ToString('o');InactiveDays=$InactiveDays;Counts=$payload.summary;OpenIntuneBaseline=$oibSummaries;TenantBranding=$tenantBrandSource;Collection=$collection;Performance=$script:GraphStats;ReportSources=@($script:ReportSources);Anonymized=[bool]$Anonymize;Warnings=@($warnings | ForEach-Object {ConvertTo-AnonymizedText $_})}
+$meta=[ordered]@{ScriptVersion='3.74';BaselineName=$BaselineName;BaselineSource=$baselineSourceLabel;OverallScore=$overallScore;DomainScores=@($domainScores|Select-Object Domain,Score,Rating,High,Medium,Low);Findings=@($findings|Select-Object Severity,Area,Finding,Affected);TenantId=$ctx.TenantId;Generated=$now.ToString('o');InactiveDays=$InactiveDays;Counts=$payload.summary;OpenIntuneBaseline=$oibSummaries;TenantBranding=$tenantBrandSource;Collection=$collection;Performance=$script:GraphStats;ReportSources=@($script:ReportSources);Anonymized=[bool]$Anonymize;Warnings=@($warnings | ForEach-Object {ConvertTo-AnonymizedText $_})}
 $meta | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 -Path (Join-Path $runPath 'Run-Metadata.json')
 Say "Report saved: $reportPath"
 Write-ConsoleEvent ('Devices: {0} | Noncompliant: {1} | Inactive: {2} | App failures: {3}' -f $devices.Count,$noncompliantCount,$inactiveCount,$appStatuses.Count)
