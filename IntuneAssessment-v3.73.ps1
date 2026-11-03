@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.2
+#Requires -Version 7.2
 <#
 .SYNOPSIS
  Read-only Intune assessment with Maester-inspired terminal dashboard, policy failures, Endpoint Security, tenant governance, maturity scoring, action plan and bilingual executive summary.
@@ -39,6 +39,8 @@
  enrollment profiles, Intune Suite, Endpoint analytics, audit log).
 .PARAMETER SkipAuditLog
  Skips the Intune audit log (destructive device actions).
+.PARAMETER SkipZeroTrust
+ Skips the Zero Trust Assessment device tests (Zero Trust view).
 .PARAMETER AuditDays
  Audit log period in days (default 30).
 .PARAMETER OutputPath
@@ -90,11 +92,13 @@
 .EXAMPLE
  .\Invoke-IntuneAssessmentDashboard.ps1 -InactiveDays 45 -SkipAppStatuses -SkipDirectoryUsers -OpenReport
 .NOTES
- Version 3.72 (consolidated build: no separate patch files required).
+ Version 3.73 (consolidated build: no separate patch files required).
  Requires PowerShell 7.2+ (ForEach-Object -Parallel, ConvertFrom-Json -AsHashtable, .NET 6 SHA256.HashData).
  Layout: 1 Parameters / 2 Console UI / 3 Helpers (Graph, CSV, report exports) / 4 Connection /
  5 Collections / 6 Analysis & findings / 7 Scoring & action plan / 8 HTML report / 9 Executive documents.
  Changelog (summary):
+  3.73 Zero Trust view: Microsoft Zero Trust Assessment device tests (Windows, macOS, iOS, Android, tenant);
+       Intune apps read from Graph beta (Store apps (new) / winGetApp now listed); -SkipZeroTrust.
   3.72 Start-up prompt to choose FlorianBaseline (default) or OpenIntuneBaseline; new -Baseline parameter.
   3.71 Configurable baseline: -BaselineRepo (default fdaminato/IntuneBaseline), -BaselineName, -BaselineRef,
        -BaselinePath (local folder), -GitHubToken (private repository). Report labels follow the baseline name.
@@ -131,6 +135,7 @@ param(
  [switch]$SkipExcelExport,
  [switch]$SkipIntuneReview,
  [switch]$SkipAuditLog,
+ [switch]$SkipZeroTrust,
  [ValidateRange(1,90)][int]$AuditDays = 30,
  [switch]$OpenReport,
  [switch]$NoConsoleDashboard,
@@ -920,7 +925,7 @@ $autopilot=@()
 if(-not $SkipAutopilot){
  $autopilot=@(Get-OptionalCollection -Name 'Autopilot devices' -Uri "$base/deviceManagement/windowsAutopilotDeviceIdentities?`$top=500")
 }else{$collection['Autopilot devices']='Skipped'}
-$appList=@(Get-OptionalCollection -Name 'Managed applications' -Uri "$base/deviceAppManagement/mobileApps?`$top=500")
+$appList=@(Get-OptionalCollection -Name 'Managed applications' -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$top=500")
 
 $userLookup=@{}
 $userLookupFailed=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -3077,6 +3082,347 @@ if($SkipIntuneReview){
 }
 
 # =====================================================================================
+# SECTION 6d - Zero Trust Assessment: Devices pillar (v3.73)
+# Re-implements the Microsoft Zero Trust Assessment device tests from the Intune data already
+# collected in this run, plus a few read-only lookups. Results are shown in the Zero Trust view;
+# they do not change the maturity score. Pass = matching policy found AND assigned.
+# =====================================================================================
+$ztRows=[System.Collections.Generic.List[object]]::new()
+function Get-ZtValue([string]$Name){ return (Get-Variable -Name $Name -Scope Script -ValueOnly -ErrorAction SilentlyContinue) }
+function Get-ZtAssignedCount($Item,$Lookup){
+ if($null -eq $Item){return $null}
+ if($Item.PSObject.Properties['assignments']){return @($Item.assignments | Where-Object {$null -ne $_}).Count}
+ $itemId=[string]$Item.id
+ if($itemId -and $Lookup.ContainsKey($itemId)){return $Lookup[$itemId]}
+ return $null
+}
+if($SkipZeroTrust){
+ $collection['Zero Trust device tests']='Skipped'
+}else{
+ Say 'Evaluating Zero Trust Assessment device tests...'
+ $ztDeviceCount=@{}
+ foreach($d in @(Get-ZtValue 'devices')){
+  $ztPlat=[string]$d.Platform
+  if(-not $ztPlat){$ztPlat=[string]$d.OS}
+  if($ztPlat -match '(?i)^android'){$ztPlat='Android'}
+  $ztDeviceCount[$ztPlat]=1+[int]$ztDeviceCount[$ztPlat]
+ }
+ $ztAssign=@{}
+ foreach($p in @(Get-ZtValue 'policyInventory')){
+  if(-not $p.Id){continue}
+  $ztAssign[[string]$p.Id]=if($p.AssignmentCoverage -eq 'Complete'){[int]$p.Assignments}else{$null}
+ }
+ $ztCatalogKnown=($collection['Settings catalog policies'] -eq 'Complete')
+ $ztSettingsByPolicy=@{}
+ $ztSettingsKnown=$false
+ foreach($r in @(Get-ZtValue 'SharedTenantSettingRows')){
+  $ztSettingsKnown=$true
+  $polId=[string]$r.Setting.File
+  if(-not $polId){continue}
+  if(-not $ztSettingsByPolicy.ContainsKey($polId)){$ztSettingsByPolicy[$polId]=[System.Collections.Generic.List[string]]::new()}
+  $ztSettingsByPolicy[$polId].Add(([string]$r.Setting.SettingId).ToLowerInvariant())
+ }
+ $ztSettingsUnknown=(-not $ztCatalogKnown) -or (-not $ztSettingsKnown)
+ $ztCatalog=@(foreach($c in @(Get-ZtValue 'catalog')){
+  $cid=AsText $c.id
+  if(-not $cid){continue}
+  $cName=AsText $c.name
+  if(-not $cName){$cName=AsText $c.displayName}
+  $cCount=Get-ZtAssignedCount $c $ztAssign
+  [pscustomobject]@{Id=$cid;Name=$cName;Platforms=(AsText $c.platforms);Family=(AsText $c.templateReference.templateFamily);Template=(AsText $c.templateReference.templateDisplayName);Assigned=$cCount}
+ })
+ $ztClassic=@(foreach($c in @(Get-ZtValue 'classic')){
+  $cid=AsText $c.id
+  if(-not $cid){continue}
+  $cCount=Get-ZtAssignedCount $c $ztAssign
+  $cType=(AsText $c.'@odata.type').Replace('#microsoft.graph.','')
+  [pscustomobject]@{Id=$cid;Name=(AsText $c.displayName);Type=$cType;Assigned=$cCount;Raw=$c}
+ })
+ $ztCompliance=@(foreach($c in @(Get-ZtValue 'compliancePolicies')){
+  $cCount=Get-ZtAssignedCount $c @{}
+  $cType=(AsText $c.'@odata.type').Replace('#microsoft.graph.','')
+  [pscustomobject]@{Id=(AsText $c.id);Name=(AsText $c.displayName);Type=$cType;Assigned=$cCount}
+ })
+ $ztW='(?i)windows'; $ztM='(?i)macos'; $ztI='(?i)^ios'
+
+ function Find-ZtCatalog {
+  param([string]$Platform,[string]$Family,[string]$Template,[string]$Setting)
+  foreach($c in $ztCatalog){
+   if($Platform -and $c.Platforms -notmatch $Platform){continue}
+   $hit=$false
+   if($Family -and $c.Family -match $Family){$hit=$true}
+   if(-not $hit -and $Template -and $c.Template -match $Template){$hit=$true}
+   if(-not $hit -and $Setting -and $ztSettingsByPolicy.ContainsKey($c.Id)){
+    if(@($ztSettingsByPolicy[$c.Id] | Where-Object {$_ -match $Setting}).Count -gt 0){$hit=$true}
+   }
+   if($hit){$c}
+  }
+ }
+ function Find-ZtClassic([string]$TypeRegex,[scriptblock]$Filter){
+  foreach($c in $ztClassic){
+   if($c.Type -notmatch $TypeRegex){continue}
+   if($null -eq $Filter -or (& $Filter $c.Raw)){$c}
+  }
+ }
+ function Find-ZtCompliance([string]$TypeRegex){
+  foreach($c in $ztCompliance){if($c.Type -match $TypeRegex){$c}}
+ }
+ function Find-ZtIntent([string]$FamilyRegex,[string]$NameRegex){
+  foreach($e in @(Get-ZtValue 'endpointSecurity')){
+   if($e.Source -ne 'Endpoint Security intent'){continue}
+   if($e.Family -notmatch $FamilyRegex){continue}
+   if($NameRegex -and $e.Policy -notmatch $NameRegex){continue}
+   $eCount=if($e.AssignmentCoverage -eq 'Complete'){[int]$e.Assignments}else{$null}
+   [pscustomobject]@{Name=$e.Policy;Assigned=$eCount}
+  }
+ }
+ function Add-ZtTest {
+  param([string]$Id,[string]$Category,[string]$Test,[string]$TestFr,[string]$Status,[string]$Evidence,[string]$Policies,[string]$PlatformKey,[string]$Recommendation,[string]$RecommendationFr)
+  if($PlatformKey -and [int]$ztDeviceCount[$PlatformKey] -eq 0 -and $Status -ne 'Pass'){
+   $Status='Not applicable'
+   $Evidence="No managed $PlatformKey device. $Evidence"
+  }
+  $ztRows.Add([pscustomobject]@{Id=$Id;Category=$Category;Test=$Test;TestFr=$TestFr;Status=$Status;Evidence=$Evidence;Policies=$Policies;Recommendation=$Recommendation;RecommendationFr=$RecommendationFr})
+ }
+ function Add-ZtFromPolicies {
+  param([string]$Id,[string]$Category,[string]$Test,[string]$TestFr,[object[]]$Matched,[bool]$Unverifiable,[string]$PlatformKey,[string]$Rec,[string]$RecFr)
+  $m=@($Matched | Where-Object {$null -ne $_})
+  $names=(@($m | Select-Object -First 6 | ForEach-Object {[string]$_.Name}) -join '; ')
+  $assigned=@($m | Where-Object {$_.Assigned -gt 0})
+  $unknown=@($m | Where-Object {$null -eq $_.Assigned})
+  if($m.Count -eq 0){
+   if($Unverifiable){$st='Not verified';$ev='Settings Catalog content was not collected in this run (baseline comparison skipped or unavailable).'}
+   else{$st='Fail';$ev='No matching policy found.'}
+  }elseif($assigned.Count -gt 0){
+   $st='Pass';$ev=('{0} matching policy(ies), {1} assigned.' -f $m.Count,$assigned.Count)
+  }elseif($unknown.Count -gt 0){
+   $st='Warning';$ev=('{0} matching policy(ies); assignment could not be verified.' -f $m.Count)
+  }else{
+   $st='Fail';$ev=('{0} matching policy(ies) found but none is assigned.' -f $m.Count)
+  }
+  Add-ZtTest -Id $Id -Category $Category -Test $Test -TestFr $TestFr -Status $st -Evidence $ev -Policies $names -PlatformKey $PlatformKey -Recommendation $Rec -RecommendationFr $RecFr
+ }
+
+ # ---------- Windows ----------
+ $m=@(Find-ZtCatalog -Platform $ztW -Template '(?i)local user group' -Setting 'localusersandgroups')
+ Add-ZtFromPolicies -Id 'ZT-W01' -Category 'Windows' -Test 'Intune Local Users and Groups policy is created and assigned' -TestFr "Une stratégie Utilisateurs et groupes locaux est créée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Create an Account protection > Local user group membership policy to control local Administrators membership.' -RecFr "Créer une stratégie Protection du compte > Appartenance aux groupes locaux pour contrôler le groupe Administrateurs local."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Setting 'passportforwork')
+ $m+=@(Find-ZtClassic '^windowsIdentityProtectionConfiguration$' $null)
+ foreach($cfg in @(Get-ZtValue 'enrollConfigs')){
+  if((AsText $cfg.'@odata.type') -match 'WindowsHelloForBusinessConfiguration' -and (AsText $cfg.state) -eq 'enabled'){$m+=[pscustomobject]@{Name='Tenant Windows Hello for Business enrollment setting';Assigned=1}}
+ }
+ Add-ZtFromPolicies -Id 'ZT-W02' -Category 'Windows' -Test 'Windows Hello for Business Policy is Configured and Assigned' -TestFr "Une stratégie Windows Hello Entreprise est configurée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Configure Windows Hello for Business (Settings Catalog or Account protection) and assign it to all Windows devices.' -RecFr "Configurer Windows Hello Entreprise (Settings Catalog ou Protection du compte) et l'assigner à tous les appareils Windows."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityApplicationControl' -Template '(?i)application control|app control' -Setting 'applicationcontrol')
+ $m+=@(Find-ZtIntent 'Application control' '')
+ Add-ZtFromPolicies -Id 'ZT-W03' -Category 'Windows' -Test 'Windows App Control for Business (WDAC) is configured and assigned via Intune' -TestFr "Windows App Control for Business (WDAC) est configuré et assigné par Intune" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Deploy an App Control for Business policy (audit mode first, then enforce) with the managed installer option.' -RecFr "Déployer une stratégie App Control for Business (mode audit d'abord, puis application) avec le programme d'installation géré."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityEndpointPrivilegeManagement' -Template '(?i)privilege management')
+ Add-ZtFromPolicies -Id 'ZT-W04' -Category 'Windows' -Test 'Windows Endpoint Privilege Management is configured and assigned' -TestFr "Endpoint Privilege Management Windows est configuré et assigné" -Matched $m -Unverifiable (-not $ztCatalogKnown) -PlatformKey 'Windows' -Rec 'Configure Endpoint Privilege Management (elevation settings and rules) so standard users can elevate approved apps without admin rights. Requires an EPM or Intune Suite licence.' -RecFr "Configurer Endpoint Privilege Management (paramètres et règles d'élévation) pour élever les applications approuvées sans droits d'administrateur. Nécessite une licence EPM ou Intune Suite."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family '(?i)baseline')
+ $m+=@(Find-ZtIntent 'Security baseline' '')
+ Add-ZtFromPolicies -Id 'ZT-W05' -Category 'Windows' -Test 'Windows Security Baseline is Configured and Assigned' -TestFr "Une baseline de sécurité Windows est configurée et assignée" -Matched $m -Unverifiable (-not $ztCatalogKnown) -PlatformKey 'Windows' -Rec 'Assign a Windows security baseline (Intune security baselines or an equivalent baseline such as OpenIntuneBaseline).' -RecFr "Assigner une baseline de sécurité Windows (baselines de sécurité Intune ou équivalent, comme OpenIntuneBaseline)."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Template '(?i)laps|local admin password' -Setting '^device_vendor_msft_laps')
+ $m+=@(Find-ZtIntent 'Windows LAPS' '')
+ Add-ZtFromPolicies -Id 'ZT-W06' -Category 'Windows' -Test 'Windows Cloud LAPS policy is created and assigned' -TestFr "Une stratégie Windows LAPS (cloud) est créée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Create an Account protection > Local admin password solution (Windows LAPS) policy with backup to Microsoft Entra ID.' -RecFr "Créer une stratégie Protection du compte > Windows LAPS avec sauvegarde dans Microsoft Entra ID."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityAntivirus' -Template '(?i)antivirus')
+ $m+=@(Find-ZtIntent 'Defender' '(?i)antivirus|\bav\b')
+ Add-ZtFromPolicies -Id 'ZT-W07' -Category 'Windows' -Test 'A Windows Defender Antivirus policy is created and assigned' -TestFr "Une stratégie Microsoft Defender Antivirus Windows est créée et assignée" -Matched $m -Unverifiable (-not $ztCatalogKnown) -PlatformKey 'Windows' -Rec 'Create an Endpoint security > Antivirus policy (real-time protection, cloud protection, PUA) and assign it to all Windows devices.' -RecFr "Créer une stratégie Sécurité des points de terminaison > Antivirus (protection en temps réel, cloud, PUA) et l'assigner à tous les appareils Windows."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityAttackSurfaceReduction' -Template '(?i)attack surface' -Setting 'attacksurfacereductionrules')
+ $m+=@(Find-ZtIntent 'Attack Surface Reduction' '')
+ Add-ZtFromPolicies -Id 'ZT-W08' -Category 'Windows' -Test 'Attack Surface Reduction rules are applied to Windows devices to prevent exploitation of vulnerable system components' -TestFr "Les règles de réduction de la surface d'attaque (ASR) sont appliquées aux appareils Windows" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Deploy ASR rules (audit first, then block) with documented exclusions.' -RecFr "Déployer les règles ASR (audit d'abord, puis blocage) avec des exclusions documentées."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityFirewall' -Template '(?i)firewall')
+ $m+=@(Find-ZtIntent 'Firewall' '')
+ Add-ZtFromPolicies -Id 'ZT-W09' -Category 'Windows' -Test 'Windows Firewall Policy is Created and Assigned' -TestFr "Une stratégie Pare-feu Windows est créée et assignée" -Matched $m -Unverifiable (-not $ztCatalogKnown) -PlatformKey 'Windows' -Rec 'Create an Endpoint security > Firewall policy enabling all three profiles and assign it to all Windows devices.' -RecFr "Créer une stratégie Sécurité des points de terminaison > Pare-feu activant les trois profils et l'assigner à tous les appareils Windows."
+
+ $m=@(Find-ZtCatalog -Platform $ztW -Family 'endpointSecurityDiskEncryption' -Template '(?i)bitlocker' -Setting 'bitlocker')
+ $m+=@(Find-ZtIntent 'Disk encryption' '')
+ $m+=@(Find-ZtClassic '^windows10EndpointProtectionConfiguration$' {param($r) $r.bitLockerEncryptDevice -eq $true})
+ Add-ZtFromPolicies -Id 'ZT-W10' -Category 'Windows' -Test 'Data on Windows is protected by BitLocker encryption' -TestFr "Les données Windows sont protégées par le chiffrement BitLocker" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'Windows' -Rec 'Create an Endpoint security > Disk encryption (BitLocker) policy with recovery key backup to Entra ID.' -RecFr "Créer une stratégie Chiffrement de disque (BitLocker) avec sauvegarde de la clé de récupération dans Entra ID."
+
+ $m=@(Find-ZtCompliance '^windows10CompliancePolicy$')
+ Add-ZtFromPolicies -Id 'ZT-W11' -Category 'Windows' -Test 'Windows Compliance Policy is Created and Assigned' -TestFr "Une stratégie de conformité Windows est créée et assignée" -Matched $m -Unverifiable ($collection['Compliance policies'] -ne 'Complete') -PlatformKey 'Windows' -Rec 'Create and assign a Windows compliance policy (BitLocker, Secure Boot, Defender, minimum OS).' -RecFr "Créer et assigner une stratégie de conformité Windows (BitLocker, Secure Boot, Defender, OS minimal)."
+
+ $wu=@(foreach($u in @(Get-ZtValue 'updateInventory')){$uCount=if($u.AssignmentCoverage -eq 'Complete'){[int]$u.Assignments}else{$null};[pscustomobject]@{Name=$u.Name;Assigned=$uCount}})
+ Add-ZtFromPolicies -Id 'ZT-W12' -Category 'Windows' -Test 'Windows Update policies are enforced to reduce risk from unpatched vulnerabilities' -TestFr "Des stratégies Windows Update sont appliquées pour réduire les risques liés aux vulnérabilités non corrigées" -Matched $wu -Unverifiable ($collection['Classic configuration policies'] -ne 'Complete') -PlatformKey 'Windows' -Rec 'Assign Windows Update rings (or Autopatch) with quality update deadlines, and feature update policies.' -RecFr "Assigner des anneaux Windows Update (ou Autopatch) avec des échéances de mises à jour qualité, ainsi que des stratégies de mises à jour de fonctionnalité."
+
+ $mdmScope=$null
+ try{
+  $mdmPolicy=Invoke-GraphJson -Uri 'https://graph.microsoft.com/beta/policies/mobileDeviceManagementPolicies/0000000a-0000-0000-c000-000000000000' -Label 'MDM user scope'
+  $mdmScope=AsText $mdmPolicy.appliesTo
+ }catch{}
+ if(-not $mdmScope){$st='Not verified';$ev='MDM user scope could not be read (Policy.Read.All required).'}
+ elseif($mdmScope -eq 'all'){$st='Pass';$ev='MDM user scope: All.'}
+ elseif($mdmScope -eq 'selected'){$st='Pass';$ev='MDM user scope: selected groups.'}
+ else{$st='Fail';$ev="MDM user scope: $mdmScope."}
+ Add-ZtTest -Id 'ZT-W13' -Category 'Windows' -Test 'Windows Automatic Enrollment is enabled' -TestFr "L'inscription automatique Windows est activée" -Status $st -Evidence $ev -Policies '' -PlatformKey '' -Recommendation 'Set Entra ID > Mobility (MDM and WIP) > Microsoft Intune > MDM user scope to All (or the target groups).' -RecommendationFr "Régler Entra ID > Mobilité (MDM et WIP) > Microsoft Intune > Étendue de l'utilisateur MDM sur Tous (ou les groupes cibles)."
+
+ $m=@(Find-ZtClassic '^windowsHealthMonitoringConfiguration$' $null)
+ Add-ZtFromPolicies -Id 'ZT-W14' -Category 'Windows' -Test 'Intune Endpoint Analytics policy is created and assigned' -TestFr "Une stratégie Endpoint Analytics est créée et assignée" -Matched $m -Unverifiable ($collection['Classic configuration policies'] -ne 'Complete') -PlatformKey 'Windows' -Rec 'Assign the Intune data collection policy (Windows health monitoring) to enable Endpoint analytics.' -RecFr "Assigner la stratégie de collecte de données Intune (surveillance de l'intégrité Windows) pour activer Endpoint analytics."
+
+ # ---------- macOS ----------
+ $m=@(Find-ZtCatalog -Platform $ztM -Family 'endpointSecurityAntivirus' -Template '(?i)antivirus')
+ Add-ZtFromPolicies -Id 'ZT-M01' -Category 'macOS' -Test 'A Microsoft Defender Antivirus policy is created and assigned in Intune for macOS' -TestFr "Une stratégie Microsoft Defender Antivirus est créée et assignée pour macOS" -Matched $m -Unverifiable (-not $ztCatalogKnown) -PlatformKey 'macOS' -Rec 'Create an Endpoint security > Antivirus policy for macOS (Defender for Endpoint) and assign it to all Macs.' -RecFr "Créer une stratégie Antivirus macOS (Defender for Endpoint) et l'assigner à tous les Mac."
+
+ $hasAde=@(Get-ZtValue 'connectorRows' | Where-Object {[string]$_.Connector -match 'Automated Device Enrollment'}).Count -gt 0
+ $macLaps=@(Find-ZtCatalog -Platform $ztM -Setting '(?i)laps|localadminpassword')
+ $adeLaps=[System.Collections.Generic.List[object]]::new()
+ if($hasAde){
+  try{
+   foreach($tok in @(Read-GraphPages -Uri 'https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings' -Label 'ADE tokens (Zero Trust)')){
+    foreach($prof in @(Read-GraphPages -Uri ("https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings/{0}/enrollmentProfiles" -f (AsText $tok.id)) -Label 'ADE profiles (Zero Trust)')){
+     if((AsText $prof.'@odata.type') -notmatch '(?i)macos'){continue}
+     $adminProps=@($prof.PSObject.Properties | Where-Object {$_.Name -match '(?i)adminAccount' -and (AsText $_.Value) -and (AsText $_.Value) -notin @('False','0','none')})
+     if($adminProps.Count){$adeLaps.Add([pscustomobject]@{Name=('ADE profile: '+(AsText $prof.displayName));Assigned=1})}
+    }
+   }
+  }catch{}
+ }
+ $m=@($macLaps)+@($adeLaps)
+ if($m.Count -eq 0 -and -not $hasAde){
+  Add-ZtTest -Id 'ZT-M02' -Category 'macOS' -Test 'A macOS Cloud LAPS Policy is Created and Assigned' -TestFr "Une stratégie macOS LAPS (cloud) est créée et assignée" -Status 'Fail' -Evidence 'No Apple ADE token: macOS local admin password management requires Automated Device Enrollment.' -Policies '' -PlatformKey 'macOS' -Recommendation 'Configure a local admin account with password rotation in the macOS ADE enrollment profile.' -RecommendationFr "Configurer un compte administrateur local avec rotation du mot de passe dans le profil d'inscription ADE macOS."
+ }else{
+  Add-ZtFromPolicies -Id 'ZT-M02' -Category 'macOS' -Test 'A macOS Cloud LAPS Policy is Created and Assigned' -TestFr "Une stratégie macOS LAPS (cloud) est créée et assignée" -Matched $m -Unverifiable $false -PlatformKey 'macOS' -Rec 'Configure a local admin account with password rotation in the macOS ADE enrollment profile.' -RecFr "Configurer un compte administrateur local avec rotation du mot de passe dans le profil d'inscription ADE macOS."
+ }
+
+ $m=@(Find-ZtCatalog -Platform $ztM -Family 'endpointSecurityDiskEncryption' -Template '(?i)filevault' -Setting 'filevault')
+ $m+=@(Find-ZtClassic '^macOSEndpointProtectionConfiguration$' {param($r) $r.fileVaultEnabled -eq $true})
+ Add-ZtFromPolicies -Id 'ZT-M03' -Category 'macOS' -Test 'Intune macOS FileVault policy is created and Assigned' -TestFr "Une stratégie FileVault macOS est créée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'macOS' -Rec 'Create an Endpoint security > Disk encryption (FileVault) policy with recovery key escrow to Intune.' -RecFr "Créer une stratégie Chiffrement de disque (FileVault) avec dépôt de la clé de récupération dans Intune."
+
+ $m=@(Find-ZtCatalog -Platform $ztM -Setting 'softwareupdate')
+ $m+=@(Find-ZtClassic '^macOSSoftwareUpdateConfiguration$' $null)
+ Add-ZtFromPolicies -Id 'ZT-M04' -Category 'macOS' -Test 'macOS update policy is configured and assigned' -TestFr "Une stratégie de mise à jour macOS est configurée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'macOS' -Rec 'Configure declarative software update settings (target version and date) in a Settings Catalog policy.' -RecFr "Configurer les paramètres de mise à jour déclaratifs (version et date cibles) dans une stratégie Settings Catalog."
+
+ $m=@(Find-ZtClassic '^macOSEnterpriseWiFiConfiguration$' $null)
+ $m+=@(Find-ZtClassic '^macOSWiFiConfiguration$' {param($r) (AsText $r.wiFiSecurityType) -match '(?i)enterprise'})
+ Add-ZtFromPolicies -Id 'ZT-M05' -Category 'macOS' -Test 'Corporate Wi-Fi Network on macOS Devices is Securely Managed' -TestFr "Le réseau Wi-Fi d'entreprise des appareils macOS est géré de façon sécurisée" -Matched $m -Unverifiable ($collection['Classic configuration policies'] -ne 'Complete') -PlatformKey 'macOS' -Rec 'Deploy an enterprise (802.1X, certificate-based) Wi-Fi profile for macOS instead of a pre-shared key.' -RecFr "Déployer un profil Wi-Fi d'entreprise macOS (802.1X par certificat) plutôt qu'une clé partagée."
+
+ $m=@(Find-ZtCompliance '^macOSCompliancePolicy$')
+ Add-ZtFromPolicies -Id 'ZT-M06' -Category 'macOS' -Test 'macOS Compliance Policy is Created and Assigned' -TestFr "Une stratégie de conformité macOS est créée et assignée" -Matched $m -Unverifiable ($collection['Compliance policies'] -ne 'Complete') -PlatformKey 'macOS' -Rec 'Create and assign a macOS compliance policy (FileVault, firewall, minimum OS, password).' -RecFr "Créer et assigner une stratégie de conformité macOS (FileVault, pare-feu, OS minimal, mot de passe)."
+
+ $m=@(Find-ZtCatalog -Platform $ztM -Family 'endpointSecurityFirewall' -Template '(?i)firewall' -Setting 'com\.apple\.security\.firewall')
+ $m+=@(Find-ZtClassic '^macOSEndpointProtectionConfiguration$' {param($r) $r.firewallEnabled -eq $true})
+ Add-ZtFromPolicies -Id 'ZT-M07' -Category 'macOS' -Test 'macOS - Firewall policy is created and assigned' -TestFr "macOS : une stratégie de pare-feu est créée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'macOS' -Rec 'Create an Endpoint security > macOS firewall policy (enable firewall, stealth mode) and assign it.' -RecFr "Créer une stratégie de pare-feu macOS (pare-feu et mode furtif activés) et l'assigner."
+
+ $m=@(Find-ZtCatalog -Platform $ztM -Setting 'extensiblesso|platformsso')
+ Add-ZtFromPolicies -Id 'ZT-M08' -Category 'macOS' -Test 'macOS - Platform SSO is configured and assigned' -TestFr "macOS : Platform SSO est configuré et assigné" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'macOS' -Rec 'Configure Platform SSO (Extensible Single Sign-On with the Company Portal SSO extension) in a Settings Catalog policy.' -RecFr "Configurer Platform SSO (Extensible Single Sign-On avec l'extension SSO du Portail d'entreprise) dans une stratégie Settings Catalog."
+
+ # ---------- iOS / iPadOS ----------
+ $m=@(Find-ZtClassic '^iosEnterpriseWiFiConfiguration$' $null)
+ $m+=@(Find-ZtClassic '^iosWiFiConfiguration$' {param($r) (AsText $r.wiFiSecurityType) -match '(?i)enterprise'})
+ Add-ZtFromPolicies -Id 'ZT-I01' -Category 'iOS' -Test 'Corporate Wi-Fi network on iOS devices is securely managed' -TestFr "Le réseau Wi-Fi d'entreprise des appareils iOS est géré de façon sécurisée" -Matched $m -Unverifiable ($collection['Classic configuration policies'] -ne 'Complete') -PlatformKey 'iOS' -Rec 'Deploy an enterprise (802.1X, certificate-based) Wi-Fi profile for iOS/iPadOS.' -RecFr "Déployer un profil Wi-Fi d'entreprise iOS/iPadOS (802.1X par certificat)."
+
+ $m=@(Find-ZtClassic '^iosUpdateConfiguration$' $null)
+ $m+=@(Find-ZtCatalog -Platform $ztI -Setting 'softwareupdate')
+ Add-ZtFromPolicies -Id 'ZT-I02' -Category 'iOS' -Test 'An iOS update policy is created and assigned' -TestFr "Une stratégie de mise à jour iOS est créée et assignée" -Matched $m -Unverifiable $ztSettingsUnknown -PlatformKey 'iOS' -Rec 'Configure declarative software update settings (or an iOS update policy) for supervised devices.' -RecFr "Configurer les mises à jour déclaratives (ou une stratégie de mise à jour iOS) pour les appareils supervisés."
+
+ $m=@(Find-ZtCompliance '^iosCompliancePolicy$')
+ Add-ZtFromPolicies -Id 'ZT-I03' -Category 'iOS' -Test 'Compliance policy assignment for iOS/iPadOS devices' -TestFr "Une stratégie de conformité iOS/iPadOS est assignée" -Matched $m -Unverifiable ($collection['Compliance policies'] -ne 'Complete') -PlatformKey 'iOS' -Rec 'Create and assign an iOS/iPadOS compliance policy (minimum OS, passcode, jailbreak detection).' -RecFr "Créer et assigner une stratégie de conformité iOS/iPadOS (OS minimal, code d'accès, détection de jailbreak)."
+
+ $mamIos=@(foreach($r in @(Get-ZtValue 'mamRows')){if($r.Platform -eq 'iOS'){[pscustomobject]@{Name=$r.Policy;Assigned=$r.Assignments}}})
+ $mamKnown=([string]$collection['App protection policies']) -like 'Complete*'
+ Add-ZtFromPolicies -Id 'ZT-I04' -Category 'iOS' -Test 'An app protection policy for iOS devices exists' -TestFr "Une stratégie de protection des applications iOS existe" -Matched $mamIos -Unverifiable (-not $mamKnown) -PlatformKey '' -Rec 'Create an iOS app protection policy (PIN, no backup, restricted copy/paste) and assign it to all users.' -RecFr "Créer une stratégie de protection des applications iOS (code PIN, pas de sauvegarde, copier-coller restreint) et l'assigner à tous les utilisateurs."
+
+ # ---------- Android ----------
+ $m=@(Find-ZtClassic '(?i)^(android|aosp).*EnterpriseWiFiConfiguration$' $null)
+ Add-ZtFromPolicies -Id 'ZT-A01' -Category 'Android' -Test 'Secure Wi-Fi profiles protect Android devices from unauthorized network access' -TestFr "Des profils Wi-Fi sécurisés protègent les appareils Android des accès réseau non autorisés" -Matched $m -Unverifiable ($collection['Classic configuration policies'] -ne 'Complete') -PlatformKey 'Android' -Rec 'Deploy an enterprise (802.1X, certificate-based) Wi-Fi profile for Android Enterprise devices.' -RecFr "Déployer un profil Wi-Fi d'entreprise (802.1X par certificat) pour les appareils Android Enterprise."
+
+ $m=@(Find-ZtCompliance '^androidDeviceOwnerCompliancePolicy$')
+ Add-ZtFromPolicies -Id 'ZT-A02' -Category 'Android' -Test 'Compliance policy assignment for Android Enterprise Fully managed device is configured and assigned' -TestFr "Une stratégie de conformité Android Enterprise entièrement géré est configurée et assignée" -Matched $m -Unverifiable ($collection['Compliance policies'] -ne 'Complete') -PlatformKey 'Android' -Rec 'Create and assign a compliance policy for fully managed, dedicated and corporate work profile devices.' -RecFr "Créer et assigner une stratégie de conformité pour les appareils entièrement gérés, dédiés et profil professionnel d'entreprise."
+
+ $m=@(Find-ZtCompliance '^androidWorkProfileCompliancePolicy$')
+ Add-ZtFromPolicies -Id 'ZT-A03' -Category 'Android' -Test 'Compliance Policy for Android Enterprise Personally-Owned Work Profile is configured and assigned' -TestFr "Une stratégie de conformité Android Enterprise profil professionnel personnel est configurée et assignée" -Matched $m -Unverifiable ($collection['Compliance policies'] -ne 'Complete') -PlatformKey 'Android' -Rec 'Create and assign a compliance policy for personally-owned work profile devices.' -RecFr "Créer et assigner une stratégie de conformité pour les appareils personnels avec profil professionnel."
+
+ $mamAnd=@(foreach($r in @(Get-ZtValue 'mamRows')){if($r.Platform -eq 'Android'){[pscustomobject]@{Name=$r.Policy;Assigned=$r.Assignments}}})
+ Add-ZtFromPolicies -Id 'ZT-A04' -Category 'Android' -Test 'An app protection policy for Android devices exists' -TestFr "Une stratégie de protection des applications Android existe" -Matched $mamAnd -Unverifiable (-not $mamKnown) -PlatformKey '' -Rec 'Create an Android app protection policy (PIN, no backup, restricted copy/paste) and assign it to all users.' -RecFr "Créer une stratégie de protection des applications Android (code PIN, pas de sauvegarde, copier-coller restreint) et l'assigner à tous les utilisateurs."
+
+ $mde=@(Get-ZtValue 'mtdConnectors' | Where-Object {(AsText $_.id) -eq 'fc780465-2017-40d4-a0c5-307022471b92'}) | Select-Object -First 1
+ if($null -eq $mde){$st=if($collection['Connectors and tokens'] -like 'Complete*'){'Fail'}else{'Not verified'};$ev='Microsoft Defender for Endpoint connector not found.'}
+ elseif((AsText $mde.partnerState) -eq 'enabled' -and $mde.androidEnabled -eq $true){$st='Pass';$ev='Defender for Endpoint connector enabled for Android.'}
+ else{$st='Fail';$ev=('Defender connector state: {0}; Android enabled: {1}' -f (AsText $mde.partnerState),(AsText $mde.androidEnabled))}
+ Add-ZtTest -Id 'ZT-A05' -Category 'Android' -Test 'Automatic Enrollment to Defender is enabled for Android Devices' -TestFr "L'intégration automatique à Defender est activée pour les appareils Android" -Status $st -Evidence $ev -Policies '' -PlatformKey 'Android' -Recommendation 'Enable Android in the Microsoft Defender for Endpoint connector and deploy the Defender app with auto-onboarding.' -RecommendationFr "Activer Android dans le connecteur Microsoft Defender for Endpoint et déployer l'application Defender avec intégration automatique."
+
+ # ---------- Tenant ----------
+ $pimEligible=$null
+ try{$pimEligible=@(Read-GraphPages -Uri "$base/roleManagement/directory/roleEligibilitySchedules?`$filter=roleDefinitionId eq '3a2c62db-5318-420d-8d74-23affee5d9d5'" -Label 'PIM eligibility (Intune Administrator)').Count}catch{}
+ $roleCountsZt=Get-ZtValue 'roleCounts'
+ $pimActive=if($roleCountsZt -and $roleCountsZt.ContainsKey('Intune Administrator')){[int]$roleCountsZt['Intune Administrator']}else{$null}
+ if($null -eq $pimEligible){$st='Not verified';$ev='PIM eligibility could not be read (RoleManagement.Read.Directory and Entra ID P2 required).'}
+ elseif($pimEligible -gt 0 -and $pimActive -eq 0){$st='Pass';$ev="$pimEligible eligible assignment(s), no active assignment."}
+ elseif($pimEligible -gt 0){$st='Warning';$ev="$pimEligible eligible assignment(s), $pimActive active (permanent or currently activated)."}
+ else{$st='Fail';$ev="No eligible assignment; active assignments: $pimActive."}
+ Add-ZtTest -Id 'ZT-T01' -Category 'Tenant' -Test 'Privileged Identity Management is enforced for Intune Administrator role assignments' -TestFr "Privileged Identity Management est imposé pour les attributions du rôle Administrateur Intune" -Status $st -Evidence $ev -Policies '' -PlatformKey '' -Recommendation 'Convert permanent Intune Administrator assignments to PIM eligible assignments with approval and MFA on activation.' -RecommendationFr "Convertir les attributions permanentes Administrateur Intune en attributions éligibles PIM avec approbation et MFA à l'activation."
+
+ $caKnown=($collection['Conditional Access'] -eq 'Complete')
+ $caDev=@(Get-ZtValue 'caRows' | Where-Object {$_.RequiresCompliantDevice})
+ $caOn=@($caDev | Where-Object {$_.State -eq 'enabled'})
+ if(-not $caKnown){$st='Not verified';$ev='Conditional Access not collected.'}
+ elseif($caOn.Count){$st='Pass';$ev=('{0} enabled policy(ies) require a compliant device.' -f $caOn.Count)}
+ elseif($caDev.Count){$st='Warning';$ev='Device compliance is required only in report-only or disabled policies.'}
+ else{$st='Fail';$ev='No Conditional Access policy requires a compliant device.'}
+ $caNames=(@($caDev | Select-Object -First 6 | ForEach-Object {$_.Policy}) -join '; ')
+ Add-ZtTest -Id 'ZT-T02' -Category 'Tenant' -Test 'Non-compliant Devices are Restricted from Accessing Corporate Data' -TestFr "Les appareils non conformes ne peuvent pas accéder aux données de l'entreprise" -Status $st -Evidence $ev -Policies $caNames -PlatformKey '' -Recommendation 'Enforce a Conditional Access policy requiring a compliant device for corporate apps.' -RecommendationFr "Appliquer une stratégie d'accès conditionnel exigeant un appareil conforme pour les applications de l'entreprise."
+
+ $caApp=@(Get-ZtValue 'caRows' | Where-Object {$_.RequiresAppProtection})
+ $caAppOn=@($caApp | Where-Object {$_.State -eq 'enabled'})
+ if(-not $caKnown){$st='Not verified';$ev='Conditional Access not collected.'}
+ elseif($caAppOn.Count){$st='Pass';$ev=('{0} enabled policy(ies) require an app protection policy or approved app.' -f $caAppOn.Count)}
+ elseif($caApp.Count){$st='Warning';$ev='App protection is required only in report-only or disabled policies.'}
+ else{$st='Fail';$ev='No Conditional Access policy requires app protection.'}
+ $caAppNames=(@($caApp | Select-Object -First 6 | ForEach-Object {$_.Policy}) -join '; ')
+ Add-ZtTest -Id 'ZT-T03' -Category 'Tenant' -Test 'Unmanaged and unprotected Apps are restricted from Accessing Corporate Data' -TestFr "Les applications non gérées et non protégées ne peuvent pas accéder aux données de l'entreprise" -Status $st -Evidence $ev -Policies $caAppNames -PlatformKey '' -Recommendation 'Enforce a Conditional Access policy requiring an app protection policy on iOS and Android.' -RecommendationFr "Appliquer une stratégie d'accès conditionnel exigeant une stratégie de protection des applications sur iOS et Android."
+
+ try{
+  $termsZt=@(Read-GraphPages -Uri "$base/deviceManagement/termsAndConditions?`$expand=assignments" -Label 'Terms and conditions (Zero Trust)')
+  $m=@(foreach($t in $termsZt){$tCount=@($t.assignments | Where-Object {$null -ne $_}).Count;[pscustomobject]@{Name=(AsText $t.displayName);Assigned=$tCount}})
+  Add-ZtFromPolicies -Id 'ZT-T04' -Category 'Tenant' -Test 'Intune Terms and Conditions Policy is configured and assigned' -TestFr "Les conditions générales Intune sont configurées et assignées" -Matched $m -Unverifiable $false -PlatformKey '' -Rec 'Create Intune terms and conditions (or Entra terms of use) and assign them to enrolling users.' -RecFr "Créer des conditions générales Intune (ou des conditions d'utilisation Entra) et les assigner aux utilisateurs qui inscrivent un appareil."
+ }catch{Add-ZtTest -Id 'ZT-T04' -Category 'Tenant' -Test 'Intune Terms and Conditions Policy is configured and assigned' -TestFr "Les conditions générales Intune sont configurées et assignées" -Status 'Not verified' -Evidence $_.Exception.Message -Policies '' -PlatformKey '' -Recommendation 'Create Intune terms and conditions and assign them.' -RecommendationFr "Créer des conditions générales Intune et les assigner."}
+
+ try{
+  $tagsZt=@(Read-GraphPages -Uri 'https://graph.microsoft.com/beta/deviceManagement/roleScopeTags' -Label 'Scope tags (Zero Trust)')
+  $customTagsZt=@($tagsZt | Where-Object {(AsText $_.id) -ne '0'})
+  $usedTagsZt=@(Get-ZtValue 'rbacRows' | Where-Object {$_.Source -eq 'Intune RBAC'} | ForEach-Object {@(([string]$_.ScopeTags) -split ',\s*')} | Where-Object {$_ -and $_ -ne '0'} | Select-Object -Unique)
+  if($customTagsZt.Count -eq 0){$st='Fail';$ev='Only the Default scope tag exists.'}
+  elseif($usedTagsZt.Count){$st='Pass';$ev=('{0} custom scope tag(s), {1} used in Intune role assignments.' -f $customTagsZt.Count,$usedTagsZt.Count)}
+  else{$st='Warning';$ev=('{0} custom scope tag(s), none used in Intune role assignments.' -f $customTagsZt.Count)}
+  $tagNamesZt=(@($customTagsZt | Select-Object -First 8 | ForEach-Object {AsText $_.displayName}) -join '; ')
+ }catch{$st='Not verified';$ev=$_.Exception.Message;$tagNamesZt=''}
+ Add-ZtTest -Id 'ZT-T05' -Category 'Tenant' -Test 'Intune Scope Tags are Configured for Delegated Administration' -TestFr "Des balises d'étendue Intune sont configurées pour l'administration déléguée" -Status $st -Evidence $ev -Policies $tagNamesZt -PlatformKey '' -Recommendation 'Create scope tags per site or team and use them in Intune role assignments.' -RecommendationFr "Créer des balises d'étendue par site ou par équipe et les utiliser dans les attributions de rôles Intune."
+
+ try{
+  $brandsZt=@(Read-GraphPages -Uri 'https://graph.microsoft.com/beta/deviceManagement/intuneBrandingProfiles' -Label 'Company Portal branding')
+  $defBrand=@($brandsZt | Where-Object {$_.isDefaultProfile -eq $true}) | Select-Object -First 1
+  if($null -eq $defBrand){$defBrand=$brandsZt | Select-Object -First 1}
+  $brandFields=@('contactITName','contactITPhoneNumber','contactITEmailAddress','onlineSupportSiteUrl','privacyUrl')
+  $setFields=@($brandFields | Where-Object {$defBrand -and (AsText $defBrand.$_)})
+  if($setFields.Count -ge 2){$st='Pass'}elseif($setFields.Count -eq 1){$st='Warning'}else{$st='Fail'}
+  $ev=if($setFields.Count){'Configured: '+($setFields -join ', ')}else{'No support contact or privacy URL configured.'}
+ }catch{$st='Not verified';$ev=$_.Exception.Message}
+ Add-ZtTest -Id 'ZT-T06' -Category 'Tenant' -Test 'Company Portal branding and support settings enhance user experience and trust' -TestFr "La personnalisation et le support du Portail d'entreprise renforcent l'expérience et la confiance des utilisateurs" -Status $st -Evidence $ev -Policies '' -PlatformKey '' -Recommendation 'Set the company name, logo, IT contact, support website and privacy URL in Tenant administration > Customization.' -RecommendationFr "Renseigner le nom, le logo, le contact informatique, le site de support et l'URL de confidentialité dans Administration du locataire > Personnalisation."
+
+ $notif=@(foreach($cfg in @(Get-ZtValue 'enrollConfigs')){if((AsText $cfg.'@odata.type') -match 'deviceEnrollmentNotificationConfiguration'){$nCount=Get-ZtAssignedCount $cfg @{};[pscustomobject]@{Name=(AsText $cfg.displayName);Assigned=$nCount}}})
+ Add-ZtFromPolicies -Id 'ZT-T07' -Category 'Tenant' -Test 'Device enrollment notification is configured and assigned' -TestFr "La notification d'inscription des appareils est configurée et assignée" -Matched $notif -Unverifiable ($collection['Enrollment restrictions'] -ne 'Complete') -PlatformKey '' -Rec 'Create an enrollment notification (e-mail or push) so users are warned when a device is enrolled with their account.' -RecFr "Créer une notification d'inscription (courriel ou push) pour avertir l'utilisateur quand un appareil est inscrit avec son compte."
+
+ $cleanZt=Get-ZtValue 'cleanupDays'
+ if($null -eq $cleanZt){$st='Not verified';$ev='Device clean-up rule not read (Intune configuration review skipped or unavailable).'}
+ elseif([int]$cleanZt -gt 0){$st='Pass';$ev="Devices are removed after $cleanZt days of inactivity."}
+ else{$st='Fail';$ev='No device clean-up rule.'}
+ Add-ZtTest -Id 'ZT-T08' -Category 'Tenant' -Test 'Device Clean-up Rule is Created' -TestFr "Une règle de nettoyage des appareils est créée" -Status $st -Evidence $ev -Policies '' -PlatformKey '' -Recommendation 'Create a device clean-up rule (for example 90 to 180 days of inactivity).' -RecommendationFr "Créer une règle de nettoyage des appareils (par exemple 90 à 180 jours d'inactivité)."
+
+ $ztPass=@($ztRows | Where-Object {$_.Status -eq 'Pass'}).Count
+ $ztFail=@($ztRows | Where-Object {$_.Status -eq 'Fail'}).Count
+ $ztWarn=@($ztRows | Where-Object {$_.Status -eq 'Warning'}).Count
+ $collection['Zero Trust device tests']="Complete ($($ztRows.Count) tests: $ztPass pass, $ztFail fail, $ztWarn warning)"
+ Say "Zero Trust device tests: $ztPass pass, $ztFail fail, $ztWarn warning"
+}
+
+# =====================================================================================
 # SECTION 7 - Restitution: domain scores, prioritized action plan, framework mapping,
 # comparison with previous run, bilingual executive summary (DOCX + PDF).
 # =====================================================================================
@@ -3254,6 +3600,7 @@ Export-Data 'Enrollment-Profiles.csv' @($enrollProfileRows) @('Platform','Profil
 Export-Data 'Audit-Destructive-Actions.csv' @($auditRows) @('Date','Action','Actor','Target','Result','Activity')
 Export-Data 'Intune-Custom-Roles.csv' @($customRoleRows) @('Role','Permissions','DestructivePermissions','Detail','Assignments')
 Export-Data 'Intune-Export-Reports.csv' @($script:ReportSources) @('Report','Filter','Status','Rows','Columns','Error')
+Export-Data 'Zero-Trust-Devices.csv' @($ztRows) @('Id','Category','Test','Status','Evidence','Policies','Recommendation')
 Export-Data 'Run-Comparison.csv' @($comparison.Findings) @('Change','Severity','Area','Finding','Previous','Current')
 
 Export-Data 'Prioritized-Findings.csv' @($findings) @('Severity','Area','Finding','Affected','Evidence','Recommendation','Coverage')
@@ -3274,7 +3621,7 @@ $payload=[ordered]@{
  actionPlan=@($actionPlan);comparison=$comparison
  connectors=@($connectorRows);conditionalAccess=@($caRows);enrollment=@($enrollmentRows);esp=@($espRows);adminRoles=@($rbacRows);multiAdminApproval=@($maaRows)
  appProtection=@($mamRows);scripts=@($scriptRows);autopilotProfiles=@($autopilotProfileRows);assignmentFilters=@($filterRows);assignmentHygiene=@($hygieneRows)
- controlCoverage=@($coverageRows);osLifecycle=@($osRows);patchLag=@($patchRows);hardware=@($hardwareRows);duplicates=@($duplicateRows);crossSource=@($crossRows)
+ controlCoverage=@($coverageRows);osLifecycle=@($osRows);patchLag=@($patchRows);hardware=@($hardwareRows);duplicates=@($duplicateRows);crossSource=@($crossRows);zeroTrust=@($ztRows)
  tenantReview=@($tenantReviewRows);complianceActions=@($complianceActionRows);appAggregate=@($appAggregateRows);updateCoverage=@($updateCoverageRows);enrollProfiles=@($enrollProfileRows);auditActions=@($auditRows);customRoles=@($customRoleRows);reportSources=@($script:ReportSources)
 }
 $payloadJson=JsonSafe $payload 14
@@ -3629,7 +3976,7 @@ body.oib-drawer-active{overflow:hidden}
  .tablebox{max-height:none;overflow:visible}.wrap{padding:0;max-width:none}
  .kpis{grid-template-columns:repeat(3,1fr)}.charts-grid{grid-template-columns:repeat(2,1fr)}
 }
-</style></head><body><div class="app-shell"><aside class="app-sidebar" aria-label="Report navigation"><div class="brand"><img class="tenant-brand-image hidden" id="tenantBrandLogo" alt="Customer logo"><span id="tenantBrandFallback" class="msmark"><i></i><i></i><i></i><i></i></span><div class="brand-text"><strong id="tenantBrandName">Intune Assessment</strong><span>DEVICE MANAGEMENT REPORT</span></div></div><div class="side-nav-label">Report</div><nav class="side-nav" id="mainNav" aria-label="Report sections"><a href="#overview" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span class="nav-label">Overview</span></a><a href="#plan" data-view="plan"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12l1.5 1.5L7.5 11M3.5 18l1.5 1.5L7.5 17"/></svg><span class="nav-label">Action plan</span></a><a href="#findings" data-view="findings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6L12 3z"/><path d="M12 8v5M12 16.5v.01"/></svg><span class="nav-label">Findings</span><span class="nav-count" id="navFindings"></span></a><a href="#baseline" data-view="baseline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 20h12M5 8h14"/><path d="M5 8 2.5 14a2.6 2.6 0 0 0 5 0L5 8zM19 8l-2.5 6a2.6 2.6 0 0 0 5 0L19 8z"/></svg><span class="nav-label">Baseline</span></a><a href="#inventory" data-view="inventory"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg><span class="nav-label">Inventory</span></a><a href="#quality" data-view="quality"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="nav-label">Data quality</span><span class="nav-count" id="navWarnings"></span></a></nav><div class="sidebar-foot"><span>Tenant</span><b id="tenantShort"></b><span id="sideGenerated"></span></div></aside><div class="app-main"><header class="app-topbar"><div class="crumb"><span class="crumb-root">Intune Assessment</span><span class="sep">/</span><strong id="pageTitle">Overview</strong></div><div class="top-actions"><button type="button" class="lang-toggle" id="langToggle" aria-label="Afficher le rapport en français">FR</button><button type="button" class="icon-btn" id="themeToggle" aria-label="Switch to dark theme" title="Switch to dark theme"><svg class="theme-icon-light" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><svg class="theme-icon-dark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button><button type="button" class="icon-btn" id="printBtn" aria-label="Print report" title="Print report"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/></svg></button></div></header><main id="dashboard" class="wrap">
+</style></head><body><div class="app-shell"><aside class="app-sidebar" aria-label="Report navigation"><div class="brand"><img class="tenant-brand-image hidden" id="tenantBrandLogo" alt="Customer logo"><span id="tenantBrandFallback" class="msmark"><i></i><i></i><i></i><i></i></span><div class="brand-text"><strong id="tenantBrandName">Intune Assessment</strong><span>DEVICE MANAGEMENT REPORT</span></div></div><div class="side-nav-label">Report</div><nav class="side-nav" id="mainNav" aria-label="Report sections"><a href="#overview" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span class="nav-label">Overview</span></a><a href="#plan" data-view="plan"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12l1.5 1.5L7.5 11M3.5 18l1.5 1.5L7.5 17"/></svg><span class="nav-label">Action plan</span></a><a href="#findings" data-view="findings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6L12 3z"/><path d="M12 8v5M12 16.5v.01"/></svg><span class="nav-label">Findings</span><span class="nav-count" id="navFindings"></span></a><a href="#baseline" data-view="baseline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 20h12M5 8h14"/><path d="M5 8 2.5 14a2.6 2.6 0 0 0 5 0L5 8zM19 8l-2.5 6a2.6 2.6 0 0 0 5 0L19 8z"/></svg><span class="nav-label">Baseline</span></a><a href="#inventory" data-view="inventory"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg><span class="nav-label">Inventory</span></a><a href="#zerotrust" data-view="zerotrust"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6L12 3z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg><span class="nav-label">Zero Trust</span><span class="nav-count" id="navZt"></span></a><a href="#quality" data-view="quality"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="nav-label">Data quality</span><span class="nav-count" id="navWarnings"></span></a></nav><div class="sidebar-foot"><span>Tenant</span><b id="tenantShort"></b><span id="sideGenerated"></span></div></aside><div class="app-main"><header class="app-topbar"><div class="crumb"><span class="crumb-root">Intune Assessment</span><span class="sep">/</span><strong id="pageTitle">Overview</strong></div><div class="top-actions"><button type="button" class="lang-toggle" id="langToggle" aria-label="Afficher le rapport en français">FR</button><button type="button" class="icon-btn" id="themeToggle" aria-label="Switch to dark theme" title="Switch to dark theme"><svg class="theme-icon-light" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><svg class="theme-icon-dark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button><button type="button" class="icon-btn" id="printBtn" aria-label="Print report" title="Print report"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/></svg></button></div></header><main id="dashboard" class="wrap">
 <section class="view" id="view-overview"><section class="hero" aria-label="Assessment summary"><div class="score-ring-wrap" id="heroRing"></div><div class="hero-main"><div class="overline">INTUNE &nbsp;/&nbsp; ENDPOINT SECURITY</div><h1>Managed Devices Assessment</h1><p class="hero-sub" id="heroSummary"></p><div class="hero-meta" id="headerMeta"></div></div><div class="hero-domains"><div class="domain-head"><strong class="micro">Maturity score</strong><span>Score by domain</span></div><div id="overviewScores"></div></div></section>
 <p class="micro muted score-note" id="scoreNote"></p>
 <div class="kpis" id="kpis"></div><div class="panels charts-grid"><section class="panel"><h2>Device compliance</h2><div id="complianceGraph"></div></section><section class="panel"><h2>Operating systems</h2><div id="osGraph"></div></section><section class="panel"><h2>Management platforms</h2><div id="managementGraph"></div></section><section class="panel"><h2>Device encryption</h2><div id="encryptionGraph"></div></section></div>
@@ -3650,6 +3997,10 @@ body.oib-drawer-active{overflow:hidden}
 <section class="view hidden" id="view-inventory"><div class="view-head"><div class="overline">INVENTORY</div><h1>Explore inventory</h1><p class="muted micro">Filter your inventory, investigate issues, and export CSV evidence.</p></div>
 <div class="inventory-shell"><aside class="inventory-sidebar" id="inventorySidebar" aria-label="Inventory navigation"><div class="sidebar-heading"><span>INVENTORY SECTIONS</span><button type="button" class="sidebar-close" id="sidebarClose" aria-label="Close inventory menu">×</button></div><nav class="tabs" id="tabs" aria-label="Assessment sections"></nav></aside><div class="inventory-main"><button type="button" class="sidebar-toggle" id="sidebarToggle" aria-controls="inventorySidebar" aria-expanded="false">☰ &nbsp; Inventory sections</button>
 <section class="panel"><h2 id="sectionTitle">Device overview</h2><p id="sectionInfo" class="micro muted"></p><div id="controls" class="controls"><input id="search" type="search" placeholder="Search device, user, serial, application..." aria-label="Search"><select id="osFilter" aria-label="Operating system"></select><select id="complianceFilter" aria-label="Compliance"></select><select id="stateFilter" aria-label="Account state"></select><select id="managedFilter" aria-label="Managed by"></select><select id="manufacturerFilter" aria-label="Manufacturer"></select><select id="ownershipFilter" aria-label="Ownership"></select><select id="encryptionFilter" aria-label="Encryption"></select><select id="autopilotFilter" aria-label="Autopilot"></select><select id="policyStatusFilter" aria-label="Policy deployment status" class="hidden"></select><select id="oibStatusFilter" aria-label="Baseline comparison status" class="hidden"></select><button class="btn" id="clear">Clear filters</button></div><div class="micro muted" id="resultCount" style="margin-bottom:12px"></div><div class="tablebox"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div><div class="empty hidden" id="empty">No matching records for the selected filters.</div></section></div></div>
+</section>
+<section class="view hidden" id="view-zerotrust"><div class="view-head"><div class="overline">ZERO TRUST</div><h1>Zero Trust Assessment · Devices</h1><p class="muted micro">Device tests from the Microsoft Zero Trust Assessment, evaluated from the Intune configuration collected in this run. Pass means a matching policy exists and is assigned. Informational: these tests do not change the maturity score.</p></div>
+<section class="panel"><div id="ztSummary"></div></section>
+<section class="panel"><div class="controls"><input id="ztSearch" type="search" placeholder="Search tests..." aria-label="Search tests"><select id="ztCategory" aria-label="Platform"></select><select id="ztStatus" aria-label="Result"></select></div><div class="micro muted" id="ztCount" style="margin-bottom:10px"></div><div class="tablebox"><table><thead><tr><th>Result</th><th>Platform</th><th>Test</th><th>Evidence</th><th>Policies</th><th>Recommendation</th></tr></thead><tbody id="ztTbody"></tbody></table></div></section>
 </section>
 <section class="view hidden" id="view-quality"><div class="view-head"><div class="overline">DATA QUALITY</div><h1>Collection status &amp; limitations</h1><p class="muted micro">What was collected, what was partial and why. Unavailable data is never scored as healthy or unhealthy.</p></div>
 <section class="panel"><h2>Collection status</h2><div id="qualityStatus"></div></section>
@@ -4049,8 +4400,30 @@ renderOibSummary();renderBaselineTable();
  by('qualityWarnings').innerHTML=w.length?`<ol class="warn-list">${w.map(x=>`<li>${safe(x)}</li>`).join('')}</ol>`:'<p class="micro muted">No collection warnings.</p>';
 })();
 by('kpis').addEventListener('click',e=>{const b=e.target.closest('[data-goto]');if(!b)return;selectTab(b.dataset.goto);location.hash='#inventory'});
-const views=['overview','plan','findings','baseline','inventory','quality'];
+const views=['overview','plan','findings','baseline','inventory','zerotrust','quality'];
 function showView(){let v=(location.hash||'#overview').slice(1);if(!views.includes(v))v='overview';const navA=document.querySelector(`#mainNav a[data-view="${v}"] .nav-label`);if(navA)by('pageTitle').textContent=navA.getAttribute('data-en')||navA.textContent;for(const id of views)by('view-'+id).classList.toggle('hidden',id!==v);document.querySelectorAll('#mainNav a').forEach(a=>{const on=a.dataset.view===v;a.classList.toggle('active',on);if(on)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});window.scrollTo(0,0)}
+// ===================== v3.73 Zero Trust view =====================
+(function(){
+ const Z=D.zeroTrust||[];
+ const tone=s=>s==='Pass'?'good':s==='Fail'?'bad':s==='Warning'?'warn':'info';
+ const order={'Fail':0,'Warning':1,'Not verified':2,'Pass':3,'Not applicable':4};
+ const cnt=k=>Z.filter(r=>r.Status===k).length;
+ const pass=cnt('Pass'),fail=cnt('Fail'),warn=cnt('Warning'),na=cnt('Not applicable'),nv=cnt('Not verified');
+ const scored=pass+fail+warn,pct=scored?Math.round(100*pass/scored):null;
+ by('navZt').textContent=fail||'';
+ const seg=(v,c)=>Z.length&&v?`<span style="width:${(100*v/Z.length).toFixed(2)}%;background:${c}"></span>`:'';
+ const stats=[['Pass','good',pass],['Fail','bad',fail],['Warning','warn',warn],['Not verified','info',nv],['Not applicable','info',na]];
+ by('ztSummary').innerHTML=Z.length?`<div class="oib-hero"><div class="oib-score"><span>Tests passed</span><b>${pct===null?'—':pct+'%'}</b><span>${pass} / ${scored}</span></div><div><div class="oib-stat-row">${stats.map(([l,t,v])=>`<div class="oib-stat ${t}"><span>${l}</span><b>${v}</b></div>`).join('')}</div><div class="oib-meter">${seg(pass,'var(--green)')}${seg(warn,'var(--amber)')}${seg(fail,'var(--red)')}${seg(nv,'var(--accent)')}${seg(na,'var(--faint)')}</div></div></div><p class="micro muted">Score = passed / (passed + failed + warning). Not applicable and not verified tests are excluded.</p>`:'<p class="micro muted">Zero Trust device tests were not run.</p>';
+ fillSelect(by('ztCategory'),Z.map(r=>r.Category),'All platforms');
+ fillSelect(by('ztStatus'),Z.map(r=>r.Status),'All results');
+ function drawZt(){
+  const q=by('ztSearch').value.trim().toLowerCase(),c=by('ztCategory').value,s=by('ztStatus').value;
+  const rows=Z.filter(r=>(!c||r.Category===c)&&(!s||r.Status===s)&&(!q||[r.Test,r.TestFr,r.Evidence,r.Policies,r.Recommendation].some(v=>String(v||'').toLowerCase().includes(q)))).sort((a,b)=>(order[a.Status]??9)-(order[b.Status]??9)||String(a.Category).localeCompare(String(b.Category)));
+  by('ztCount').textContent=`${rows.length} / ${Z.length}`;
+  by('ztTbody').innerHTML=rows.length?rows.map(r=>`<tr><td><span class="pill ${tone(r.Status)}">${safe(r.Status)}</span></td><td>${safe(r.Category)}</td><td>${safe(r.Test)}</td><td class="micro">${safe(r.Evidence)}</td><td class="micro">${safe(r.Policies||'—')}</td><td class="micro">${safe(r.Recommendation)}</td></tr>`).join(''):'<tr><td colspan="6" class="empty">No test matches these filters.</td></tr>';
+ }
+ ['ztCategory','ztStatus'].forEach(id=>by(id).addEventListener('change',drawZt));by('ztSearch').addEventListener('input',drawZt);drawZt();
+})();
 window.addEventListener('hashchange',showView);
 showView();
 // ===================== v3.42 FR / EN language switch =====================
@@ -4231,6 +4604,10 @@ Object.assign(I18N_FR,{
 });
 Object.assign(I18N_FR,{'Report':'Rapport','Report navigation':'Navigation du rapport','Tenant':'Tenant','Score by domain':'Score par domaine','Quick wins':'Gains rapides','Action plan →':'Plan d\'action →','Customer logo':'Logo du client','inGracePeriod':'en période de grâce','configManager':'Configuration Manager'});
 I18N_PATTERNS.push([/^([\d\s,.]+)% of devices$/,'$1 % des appareils'],[/^(\d+) of (\d+) devices noncompliant$/,'$1 appareils non conformes sur $2'],[/^(\d+) high-severity findings?$/,'$1 constat(s) de sévérité élevée'],[/^(\d+) quick wins?$/,'$1 gain(s) rapide(s)']);
+Object.assign(I18N_FR,{'Zero Trust':'Zero Trust','ZERO TRUST':'ZERO TRUST','Zero Trust Assessment · Devices':'Évaluation Zero Trust · Appareils','Tests passed':'Tests réussis','Pass':'Réussi','Fail':'Échec','Warning':'Avertissement','Not applicable':'Non applicable','Not verified':'Non vérifié','All platforms':'Toutes les plateformes','Search tests...':'Rechercher un test...','Search tests':'Rechercher un test','Recommendation':'Recommandation','Policies':'Stratégies','Evidence':'Preuve','Result':'Résultat','No test matches these filters.':'Aucun test ne correspond à ces filtres.','Zero Trust device tests were not run.':'Les tests Zero Trust des appareils n\'ont pas été exécutés.','Zero Trust device tests':'Tests Zero Trust des appareils',
+'Score = passed / (passed + failed + warning). Not applicable and not verified tests are excluded.':'Score = réussis / (réussis + échecs + avertissements). Les tests non applicables et non vérifiés sont exclus.',
+'Device tests from the Microsoft Zero Trust Assessment, evaluated from the Intune configuration collected in this run. Pass means a matching policy exists and is assigned. Informational: these tests do not change the maturity score.':'Tests Appareils de l\'évaluation Zero Trust de Microsoft, évalués à partir de la configuration Intune collectée. Réussi signifie qu\'une stratégie correspondante existe et est assignée. Informatif : ces tests ne modifient pas le score de maturité.'});
+for(const r of (D.zeroTrust||[])){if(r.TestFr&&r.Test)I18N_FR[r.Test]=r.TestFr;if(r.RecommendationFr&&r.Recommendation)I18N_FR[r.Recommendation]=r.RecommendationFr}
 const I18N_STATUS_HEAD={'Complete':'Complet','Partial':'Partiel','Unavailable':'Indisponible','Skipped':'Ignoré','Not assessed':'Non évalué','Not verified':'Non vérifié','Not configured':'Non configuré','Not supported':'Non pris en charge','Not collected':'Non collecté','Not requested':'Non demandé'};
 I18N_PATTERNS.unshift(
  [/^(Complete|Partial|Unavailable|Skipped|Not assessed|Not verified|Not configured|Not supported|Not collected|Not requested)( \(.*\))?$/,(m,h,d)=>I18N_STATUS_HEAD[h]+(d||'')],
@@ -4572,7 +4949,7 @@ if($script:Anon.Enabled){
  # Raw Intune export CSV files contain real names: removed from anonymized runs.
  Get-ChildItem -LiteralPath $runPath -Directory -Filter 'GraphExport-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
-$meta=[ordered]@{ScriptVersion='3.72';BaselineName=$BaselineName;BaselineSource=$baselineSourceLabel;OverallScore=$overallScore;DomainScores=@($domainScores|Select-Object Domain,Score,Rating,High,Medium,Low);Findings=@($findings|Select-Object Severity,Area,Finding,Affected);TenantId=$ctx.TenantId;Generated=$now.ToString('o');InactiveDays=$InactiveDays;Counts=$payload.summary;OpenIntuneBaseline=$oibSummaries;TenantBranding=$tenantBrandSource;Collection=$collection;Performance=$script:GraphStats;ReportSources=@($script:ReportSources);Anonymized=[bool]$Anonymize;Warnings=@($warnings | ForEach-Object {ConvertTo-AnonymizedText $_})}
+$meta=[ordered]@{ScriptVersion='3.73';BaselineName=$BaselineName;BaselineSource=$baselineSourceLabel;OverallScore=$overallScore;DomainScores=@($domainScores|Select-Object Domain,Score,Rating,High,Medium,Low);Findings=@($findings|Select-Object Severity,Area,Finding,Affected);TenantId=$ctx.TenantId;Generated=$now.ToString('o');InactiveDays=$InactiveDays;Counts=$payload.summary;OpenIntuneBaseline=$oibSummaries;TenantBranding=$tenantBrandSource;Collection=$collection;Performance=$script:GraphStats;ReportSources=@($script:ReportSources);Anonymized=[bool]$Anonymize;Warnings=@($warnings | ForEach-Object {ConvertTo-AnonymizedText $_})}
 $meta | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 -Path (Join-Path $runPath 'Run-Metadata.json')
 Say "Report saved: $reportPath"
 Write-ConsoleEvent ('Devices: {0} | Noncompliant: {1} | Inactive: {2} | App failures: {3}' -f $devices.Count,$noncompliantCount,$inactiveCount,$appStatuses.Count)
@@ -4590,3 +4967,4 @@ if($OpenReport){
   else{Invoke-Item -LiteralPath $reportPath}
  }catch{Write-Warning "Could not open the report automatically: $reportPath"}
 }
+
